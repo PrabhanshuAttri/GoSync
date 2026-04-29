@@ -2,6 +2,8 @@ import argparse
 import os
 from pathlib import Path
 
+from gosync import __version__
+
 
 ENV = os.getenv("ENV", "dev").lower()
 IS_PROD = ENV in {"prod", "production"}
@@ -26,6 +28,11 @@ ACCESS_LOGS = os.getenv("ACCESS_LOGS", "true").lower() in {"1", "true", "yes", "
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download and recover GoPro cloud media from a HAR file."
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"GoSync {__version__}",
     )
     parser.add_argument(
         "--data-dir",

@@ -26,6 +26,12 @@ jobs:
         id: image
         run: echo "name=${GITHUB_REPOSITORY_OWNER,,}/gosync" >> "$GITHUB_OUTPUT"
 
+      - name: Read app version
+        id: version
+        run: |
+          VERSION="$(python -c 'import re; pathlib = __import__("pathlib"); text = pathlib.Path("src/gosync/__init__.py").read_text(); print(re.search(r"__version__ = \"([^\"]+)\"", text).group(1))')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -46,9 +52,14 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.version }}
             type=ref,event=branch
             type=ref,event=tag
             type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=GoSync
+            org.opencontainers.image.description=Self-hosted GoPro cloud media recovery from a browser HAR export
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
 
       - name: Build and publish
         uses: docker/build-push-action@v6
@@ -56,5 +67,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            GOSYNC_VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

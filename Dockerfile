@@ -1,8 +1,11 @@
 FROM python:3.12-slim
 
+ARG GOSYNC_VERSION=1.0.1
+
 LABEL org.opencontainers.image.title="GoSync"
 LABEL org.opencontainers.image.description="Self-hosted GoPro cloud media recovery from a browser HAR export"
 LABEL org.opencontainers.image.source="https://github.com/PrabhanshuAttri/GoSync"
+LABEL org.opencontainers.image.version="${GOSYNC_VERSION}"
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1

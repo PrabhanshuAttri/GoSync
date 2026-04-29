@@ -1,3 +1,4 @@
+from gosync import __version__
 from gosync.config import DEBUG
 
 from gosync.config import WEB_HOST, WEB_PORT, parse_args
@@ -12,7 +13,7 @@ def main() -> int:
 
     app = create_app(args)
     print("========================================", flush=True)
-    print("                GoSync                  ", flush=True)
+    print(f"              GoSync {__version__}              ", flush=True)
     print("========================================", flush=True)
     print(f"Open http://localhost:{WEB_PORT}", flush=True)
     app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, debug=DEBUG)

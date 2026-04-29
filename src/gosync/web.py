@@ -6,6 +6,7 @@ from pathlib import Path
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 from werkzeug.utils import secure_filename
 
+from gosync import __version__
 from gosync.config import IS_PROD, ACCESS_LOGS
 from gosync.config import resolve_inside_data_dir
 from gosync.downloader import extract_ids, get_completed_ids
@@ -136,6 +137,7 @@ def create_app(args: argparse.Namespace) -> Flask:
 
         return render_template(
             "index.html",
+            app_version=__version__,
             har_files=har_files,
             har_file=current_har or "No HAR file uploaded",
         )
