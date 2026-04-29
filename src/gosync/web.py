@@ -11,10 +11,12 @@ from gosync.config import resolve_inside_data_dir
 from gosync.downloader import extract_ids, get_completed_ids
 from gosync.progress import ProgressState
 from gosync.runtime import run_download_job
+from gosync.sidecar import run_sidecar_job
 
 
 PROGRESS = ProgressState()
 JOB_THREAD: threading.Thread | None = None
+SIDECAR_THREAD: threading.Thread | None = None
 JOB_LOCK = threading.Lock()
 RESUME_CACHE: dict[str, object] = {}
 
@@ -112,7 +114,7 @@ def create_app(args: argparse.Namespace) -> Flask:
 
     @app.post("/start")
     def start():
-        global JOB_THREAD
+        global JOB_THREAD, SIDECAR_THREAD
 
         selected_har = request.form.get("har_file") or args.har_file
         with JOB_LOCK:
@@ -120,11 +122,35 @@ def create_app(args: argparse.Namespace) -> Flask:
                 PROGRESS.log("A download is already running.")
                 return redirect(url_for("index"))
 
+            if not selected_har:
+                PROGRESS.log("No HAR file selected.")
+                return redirect(url_for("index"))
+
+            har_path = Path(selected_har)
+            if not har_path.is_absolute():
+                har_path = data_dir / selected_har
+            sidecar_dir = resolve_inside_data_dir(
+                data_dir,
+                args.sidecar_folder,
+            ).resolve()
+            PROGRESS.update(
+                sidecar_status="pending",
+                sidecar_count=0,
+                sidecar_dir=str(sidecar_dir),
+                sidecar_message="XMP sidecar generation queued.",
+            )
+
             JOB_THREAD = threading.Thread(
                 target=run_download_job,
                 args=(args, PROGRESS, selected_har),
                 daemon=True,
             )
+            SIDECAR_THREAD = threading.Thread(
+                target=run_sidecar_job,
+                args=(har_path, sidecar_dir, PROGRESS),
+                daemon=True,
+            )
+            SIDECAR_THREAD.start()
             JOB_THREAD.start()
 
         return redirect(url_for("index"))

@@ -11,6 +11,7 @@ DEFAULT_OUTPUT_FOLDER = os.getenv(
     "DOWNLOAD_FOLDER",
     os.getenv("OUTPUT_FOLDER", "downloads"),
 )
+DEFAULT_SIDECAR_FOLDER = os.getenv("SIDECAR_FOLDER", "sidecars")
 DEFAULT_COMPLETED_LOG = os.getenv("COMPLETED_LOG", "completed_ids.txt")
 DEFAULT_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))
 DEFAULT_MAX_RETRY_PASSES = int(os.getenv("MAX_RETRY_PASSES", "3"))
@@ -40,6 +41,11 @@ def parse_args() -> argparse.Namespace:
         "--output-folder",
         default=DEFAULT_OUTPUT_FOLDER,
         help="Download folder name or path. Relative paths are created inside data-dir.",
+    )
+    parser.add_argument(
+        "--sidecar-folder",
+        default=DEFAULT_SIDECAR_FOLDER,
+        help="XMP sidecar folder name or path. Relative paths are created inside data-dir.",
     )
     parser.add_argument(
         "--completed-log",

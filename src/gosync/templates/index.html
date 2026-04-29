@@ -163,12 +163,15 @@
       document.getElementById("stop-button").disabled = !isRunning || data.stop_requested;
       document.getElementById("start-button").disabled = isRunning;
       document.getElementById("activity-message").textContent = data.message || "Ready";
-      document.getElementById("activity-detail").textContent =
+      const downloadDetail =
         data.current_batch
           ? `Batch ${data.current_batch} of ${data.total_batches} · ${data.current_batch_size} file(s)`
           : data.output_dir
             ? `Output: ${data.output_dir}`
             : "Waiting for a download job.";
+      const sidecarDetail = data.sidecar_message ? `XMP: ${data.sidecar_message}` : "";
+      document.getElementById("activity-detail").textContent =
+        sidecarDetail ? `${downloadDetail}\n${sidecarDetail}` : downloadDetail;
       document.getElementById("media-label").textContent = `${data.completed_ids} / ${data.total_ids}`;
       document.getElementById("batch-label").textContent = `${data.completed_batches} / ${data.total_batches}`;
       document.getElementById("download-label").textContent =

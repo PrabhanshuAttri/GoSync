@@ -98,6 +98,10 @@ The mounted data directory is the only persistent storage GoSync needs. By defau
 data/
 ├── gopro.com.har
 ├── completed_ids.txt
+├── sidecars/
+│   ├── GX010001.MP4.xmp
+│   ├── GX010002.MP4.xmp
+│   └── ...
 └── downloads/
     ├── GX010001.MP4
     ├── GX010002.MP4
@@ -108,8 +112,12 @@ Files and folders:
 
 - `gopro.com.har`: exported browser HAR file, or another filename set with `HAR_FILE`.
 - `downloads/`: recovered media output folder, configurable with `DOWNLOAD_FOLDER`.
+- `sidecars/`: XMP sidecar output folder generated from HAR media metadata, configurable with `SIDECAR_FOLDER`.
 - `completed_ids.txt`: resume ledger, configurable with `COMPLETED_LOG`.
 - `gopro_temp_batch.zip`: temporary zip file used during a batch download; deleted after extraction or failure.
+
+See [XMP sidecar processing](docs/sidecars.md) for sidecar field selection
+and sensitive field exclusions.
 
 If a run is interrupted, start the container again with the same data directory. GoSync skips IDs already listed in `completed_ids.txt`.
 
@@ -146,6 +154,7 @@ PYTHONPATH=src python -m gosync --data-dir ./data --run-once
 | `DATA_DIR` | `/data` | Container path containing the HAR file, downloads, and resume ledger. |
 | `HAR_FILE` | `gopro.com.har` | HAR filename or path. Relative paths are resolved inside `DATA_DIR`. |
 | `DOWNLOAD_FOLDER` | `downloads` | Download output folder. Relative paths are resolved inside `DATA_DIR`. |
+| `SIDECAR_FOLDER` | `sidecars` | XMP sidecar output folder. Relative paths are resolved inside `DATA_DIR`. |
 | `COMPLETED_LOG` | `completed_ids.txt` | Resume ledger file. Relative paths are resolved inside `DATA_DIR`. |
 | `BATCH_SIZE` | `5` | Number of media IDs requested per zip batch. |
 | `MAX_RETRY_PASSES` | `3` | Number of retry passes for failed batches. Use `0` to retry forever. |

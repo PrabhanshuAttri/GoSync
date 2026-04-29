@@ -313,6 +313,7 @@ button:disabled {
 .activity p {
   margin: 5px 0 0;
   color: var(--muted);
+  white-space: pre-line;
 }
 
 .progress-stack {
