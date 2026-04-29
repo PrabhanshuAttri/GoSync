@@ -4,382 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GoSync</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f4f6f8;
-      --surface: #ffffff;
-      --surface-strong: #f9fbfc;
-      --ink: #17212b;
-      --muted: #657386;
-      --line: #d9e0e8;
-      --brand: #0f766e;
-      --brand-dark: #115e59;
-      --blue: #2563eb;
-      --amber: #b7791f;
-      --danger: #b42318;
-      --good-bg: #e6f6f3;
-      --bad-bg: #fee4e2;
-      --shadow: 0 18px 45px rgba(24, 35, 51, .08);
-    }
-
-    * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      min-width: 320px;
-      background: var(--bg);
-      color: var(--ink);
-      font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-
-    button, input, select { font: inherit; }
-
-    .shell {
-      width: min(1180px, calc(100% - 32px));
-      margin: 0 auto;
-    }
-
-    .topbar {
-      background: #fff;
-      border-bottom: 1px solid var(--line);
-    }
-
-    .topbar-inner {
-      min-height: 76px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 18px;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      min-width: 0;
-    }
-
-    .brand-mark {
-      width: 42px;
-      height: 42px;
-      border-radius: 8px;
-      display: grid;
-      place-items: center;
-      color: #fff;
-      background: linear-gradient(135deg, var(--brand), var(--blue));
-      font-weight: 800;
-      letter-spacing: 0;
-      flex: 0 0 auto;
-    }
-
-    .brand h1 {
-      margin: 0;
-      font-size: 24px;
-      line-height: 1.1;
-      letter-spacing: 0;
-    }
-
-    .brand p {
-      margin: 3px 0 0;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .status-pill {
-      display: inline-flex;
-      align-items: center;
-      min-height: 32px;
-      padding: 0 12px;
-      border-radius: 999px;
-      background: var(--good-bg);
-      color: var(--brand-dark);
-      font-weight: 700;
-      text-transform: capitalize;
-      white-space: nowrap;
-    }
-
-    .status-pill.failed {
-      background: var(--bad-bg);
-      color: var(--danger);
-    }
-
-    main {
-      padding: 24px 0 42px;
-      display: grid;
-      gap: 18px;
-    }
-
-    .workspace {
-      display: grid;
-      grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
-      gap: 18px;
-      align-items: start;
-    }
-
-    .panel, .metric {
-      background: var(--surface);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      box-shadow: var(--shadow);
-    }
-
-    .panel {
-      padding: 18px;
-    }
-
-    .panel + .panel {
-      margin-top: 14px;
-    }
-
-    .panel-header {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 14px;
-    }
-
-    h2 {
-      margin: 0;
-      font-size: 15px;
-      letter-spacing: 0;
-    }
-
-    .hint {
-      color: var(--muted);
-      font-size: 12px;
-      white-space: nowrap;
-    }
-
-    form {
-      display: grid;
-      gap: 10px;
-    }
-
-    input[type="file"], select {
-      width: 100%;
-      min-height: 42px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--surface-strong);
-      color: var(--ink);
-      padding: 8px 10px;
-    }
-
-    input[type="file"]::file-selector-button {
-      min-height: 30px;
-      margin-right: 10px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #fff;
-      color: var(--ink);
-      font-weight: 650;
-    }
-
-    button {
-      min-height: 42px;
-      border: 0;
-      border-radius: 6px;
-      padding: 0 14px;
-      font-weight: 750;
-      color: #fff;
-      background: var(--brand);
-      cursor: pointer;
-    }
-
-    button.secondary {
-      background: var(--blue);
-    }
-
-    button:disabled {
-      opacity: .5;
-      cursor: not-allowed;
-    }
-
-    .current-file {
-      margin-top: 12px;
-      display: block;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .current-file strong {
-      color: var(--ink);
-      font-weight: 700;
-    }
-
-    .metrics {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 14px;
-    }
-
-    .metric {
-      min-height: 104px;
-      padding: 16px;
-      display: grid;
-      align-content: space-between;
-    }
-
-    .metric span {
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .metric strong {
-      display: block;
-      margin-top: 4px;
-      font-size: 26px;
-      line-height: 1.1;
-      letter-spacing: 0;
-      overflow-wrap: anywhere;
-    }
-
-    .metric strong.compact {
-      font-size: 22px;
-    }
-
-    .activity {
-      border-left: 4px solid var(--brand);
-      background: linear-gradient(90deg, #eefaf7, #fff);
-    }
-
-    .activity strong {
-      display: block;
-      font-size: 18px;
-      line-height: 1.35;
-      overflow-wrap: anywhere;
-    }
-
-    .activity p {
-      margin: 5px 0 0;
-      color: var(--muted);
-    }
-
-    .progress-stack {
-      display: grid;
-      gap: 16px;
-    }
-
-    .progress-row {
-      display: grid;
-      gap: 8px;
-    }
-
-    .label {
-      display: flex;
-      justify-content: space-between;
-      gap: 14px;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .label span:last-child {
-      color: var(--ink);
-      font-weight: 650;
-      text-align: right;
-      overflow-wrap: anywhere;
-    }
-
-    .bar {
-      height: 12px;
-      background: #e7edf3;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      overflow: hidden;
-    }
-
-    .bar > div {
-      width: 0%;
-      height: 100%;
-      background: linear-gradient(90deg, var(--brand), var(--blue));
-      transition: width .25s ease;
-    }
-
-    .log {
-      margin: 0;
-      min-height: 220px;
-      max-height: 320px;
-      overflow: auto;
-      white-space: pre-wrap;
-      color: #dce6f1;
-      background: #101820;
-      border-radius: 8px;
-      padding: 14px;
-      font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-
-    .split {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr);
-      gap: 18px;
-    }
-
-    @media (max-width: 880px) {
-      .workspace {
-        grid-template-columns: 1fr;
-      }
-
-      .metrics {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-    }
-
-    @media (max-width: 600px) {
-      .shell {
-        width: min(100% - 22px, 1180px);
-      }
-
-      .topbar-inner {
-        min-height: auto;
-        padding: 16px 0;
-        align-items: flex-start;
-        flex-direction: column;
-      }
-
-      .brand-mark {
-        width: 38px;
-        height: 38px;
-      }
-
-      .brand h1 {
-        font-size: 22px;
-      }
-
-      main {
-        padding-top: 14px;
-      }
-
-      .panel {
-        padding: 14px;
-      }
-
-      .metrics {
-        grid-template-columns: 1fr;
-      }
-
-      .metric {
-        min-height: 86px;
-      }
-
-      .metric strong {
-        font-size: 25px;
-      }
-
-      .label {
-        display: grid;
-        gap: 2px;
-      }
-
-      .label span:last-child {
-        text-align: left;
-      }
-    }
-  </style>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
   <header class="topbar">
@@ -391,7 +16,10 @@
           <p>GoPro cloud library recovery</p>
         </div>
       </div>
-      <strong id="status" class="status-pill">Idle</strong>
+      <div class="topbar-actions">
+        <button id="theme-toggle" class="ghost" type="button" aria-label="Toggle color theme">Light</button>
+        <strong id="status" class="status-pill">Idle</strong>
+      </div>
     </div>
   </header>
 
@@ -421,7 +49,10 @@
               <option value="{{ file }}" {% if file == har_file %}selected{% endif %}>{{ file }}</option>
               {% endfor %}
             </select>
-            <button class="secondary" type="submit" {% if not har_files %}disabled{% endif %}>Start Download</button>
+            <button id="start-button" class="secondary" type="submit" {% if not har_files %}disabled{% endif %}>Start Download</button>
+          </form>
+          <form action="/stop" method="post" style="margin-top:10px">
+            <button id="stop-button" class="danger" type="submit" disabled>Stop Download</button>
           </form>
         </section>
       </aside>
@@ -431,6 +62,10 @@
           <div class="metric">
             <span>Media</span>
             <strong id="overall">0%</strong>
+          </div>
+          <div class="metric">
+            <span>Downloaded</span>
+            <strong id="downloaded-count">0</strong>
           </div>
           <div class="metric">
             <span>Batches</span>
@@ -481,6 +116,17 @@
   </main>
 
   <script>
+    const themeToggle = document.getElementById("theme-toggle");
+    const applyTheme = (theme) => {
+      document.documentElement.dataset.theme = theme;
+      themeToggle.textContent = theme === "light" ? "Dark" : "Light";
+      localStorage.setItem("gosync-theme", theme);
+    };
+    applyTheme(localStorage.getItem("gosync-theme") || "dark");
+    themeToggle.addEventListener("click", () => {
+      applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
+    });
+
     const setWidth = (id, value) => {
       document.getElementById(id).style.width = `${Math.max(0, Math.min(100, value || 0))}%`;
     };
@@ -507,11 +153,15 @@
       const res = await fetch("/status");
       const data = await res.json();
       document.getElementById("overall").textContent = `${data.overall_percent}%`;
+      document.getElementById("downloaded-count").textContent = `${data.completed_ids} / ${data.total_ids}`;
       document.getElementById("batches").textContent = `${data.completed_batches} / ${data.total_batches}`;
       const status = document.getElementById("status");
       status.textContent = data.status;
       status.className = `status-pill ${data.status}`;
       document.getElementById("message").textContent = data.state_label || data.status || "Ready";
+      const isRunning = data.status === "running";
+      document.getElementById("stop-button").disabled = !isRunning || data.stop_requested;
+      document.getElementById("start-button").disabled = isRunning;
       document.getElementById("activity-message").textContent = data.message || "Ready";
       document.getElementById("activity-detail").textContent =
         data.current_batch

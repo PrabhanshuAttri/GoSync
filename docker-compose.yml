@@ -3,6 +3,7 @@ services:
     image: ghcr.io/prabhanshuattri/gosync:latest
     container_name: gosync
     environment:
+      ENV: ${ENV:-dev}
       DATA_DIR: /data
       HAR_FILE: ${HAR_FILE:-gopro.com.har}
       DOWNLOAD_FOLDER: ${DOWNLOAD_FOLDER:-downloads}
@@ -11,7 +12,7 @@ services:
       MAX_RETRY_PASSES: ${MAX_RETRY_PASSES:-3}
       WEB_HOST: 0.0.0.0
       WEB_PORT: 8080
-      ACCESS_LOGS: ${ACCESS_LOGS:-false}
+      ACCESS_LOGS: ${ACCESS_LOGS:-true}
     ports:
       - ${GOSYNC_WEB_PORT:-49152}:8080
     volumes:

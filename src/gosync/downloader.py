@@ -64,6 +64,10 @@ ID_PATTERNS = (
 )
 
 
+class DownloadCancelled(Exception):
+    pass
+
+
 def resolve_har_file(data_dir: Path, har_file: str | None) -> Path:
     if har_file:
         candidate = Path(har_file)
@@ -256,6 +260,8 @@ def download_batch(
                 unit_divisor=1024,
             ) as progress_bar:
                 for chunk in response.iter_content(chunk_size=8192):
+                    if progress and progress.stop_requested:
+                        raise DownloadCancelled("Download stop requested.")
                     if chunk:
                         file.write(chunk)
                         progress_bar.update(len(chunk))
@@ -312,6 +318,9 @@ def process_pipeline(
         progress.update(total_batches=len(pending_batches), completed_batches=0)
 
     while pending_batches:
+        if progress and progress.stop_requested:
+            raise DownloadCancelled("Download stop requested.")
+
         if max_retry_passes and pass_number > max_retry_passes:
             raise RuntimeError(
                 f"Stopped after {max_retry_passes} retry passes with "
@@ -327,6 +336,9 @@ def process_pipeline(
         failed_batches: list[list[str]] = []
 
         for index, batch in enumerate(pending_batches, start=1):
+            if progress and progress.stop_requested:
+                raise DownloadCancelled("Download stop requested.")
+
             message = (
                 f"Processing batch {index} of {len(pending_batches)} "
                 f"({len(batch)} file(s))..."
@@ -377,6 +389,9 @@ def process_pipeline(
                     print("Batch extracted and logged.", flush=True)
 
             except Exception as exc:
+                if isinstance(exc, DownloadCancelled):
+                    temp_zip.unlink(missing_ok=True)
+                    raise
                 message = f"Batch failed; queued for retry: {exc}"
                 if progress:
                     progress.increment("failed_batches", 1)
