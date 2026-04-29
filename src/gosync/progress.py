@@ -8,6 +8,7 @@ class ProgressState:
     status: str = "idle"
     state_label: str = "Ready"
     message: str = "Ready"
+    stop_requested: bool = False
     total_ids: int = 0
     completed_ids: int = 0
     pending_ids: int = 0
@@ -68,6 +69,7 @@ class ProgressState:
                 "status": self.status,
                 "state_label": self.state_label,
                 "message": self.message,
+                "stop_requested": self.stop_requested,
                 "total_ids": total_ids,
                 "completed_ids": completed_ids,
                 "pending_ids": self.pending_ids,

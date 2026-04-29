@@ -1,3 +1,5 @@
+from gosync.config import DEBUG
+
 from gosync.config import WEB_HOST, WEB_PORT, parse_args
 from gosync.runtime import run_once
 from gosync.web import create_app
@@ -10,10 +12,10 @@ def main() -> int:
 
     app = create_app(args)
     print("========================================", flush=True)
-    print("             GoSync Web UI              ", flush=True)
+    print("                GoSync                  ", flush=True)
     print("========================================", flush=True)
     print(f"Open http://localhost:{WEB_PORT}", flush=True)
-    app.run(host=WEB_HOST, port=WEB_PORT, threaded=True)
+    app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, debug=DEBUG)
     return 0
 
 

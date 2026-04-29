@@ -3,6 +3,9 @@ import os
 from pathlib import Path
 
 
+ENV = os.getenv("ENV", "dev").lower()
+IS_PROD = ENV in {"prod", "production"}
+DEBUG = not IS_PROD
 DEFAULT_DATA_DIR = os.getenv("DATA_DIR", "/data")
 DEFAULT_OUTPUT_FOLDER = os.getenv(
     "DOWNLOAD_FOLDER",
@@ -14,7 +17,9 @@ DEFAULT_MAX_RETRY_PASSES = int(os.getenv("MAX_RETRY_PASSES", "3"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
-ACCESS_LOGS = os.getenv("ACCESS_LOGS", "false").lower() in {"1", "true", "yes", "on"}
+ACCESS_LOGS = os.getenv("ACCESS_LOGS", "true").lower() in {"1", "true", "yes", "on"}
+
+
 
 
 def parse_args() -> argparse.Namespace:

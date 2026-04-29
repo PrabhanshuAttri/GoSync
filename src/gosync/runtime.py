@@ -4,6 +4,7 @@ from pathlib import Path
 
 from gosync.config import resolve_inside_data_dir
 from gosync.downloader import (
+    DownloadCancelled,
     extract_browser_headers,
     extract_ids,
     process_pipeline,
@@ -64,6 +65,7 @@ def run_download_job(
         progress.update(
             status="running",
             state_label="Running",
+            stop_requested=False,
             started_at=datetime.now().isoformat(timespec="seconds"),
             finished_at="",
             total_ids=0,
@@ -76,6 +78,9 @@ def run_download_job(
             current_batch_size=0,
             current_download_bytes=0,
             current_download_total=0,
+            current_download_started_at=0,
+            current_download_speed_bps=0,
+            current_download_elapsed_seconds=0,
             output_dir=str(output_dir),
             har_file=str(har_path),
         )
@@ -102,10 +107,26 @@ def run_download_job(
             current_download_total=0,
         )
         progress.log(f"Done. Recovered media is in {output_dir}.")
+    except DownloadCancelled:
+        progress.update(
+            status="stopped",
+            state_label="Stopped",
+            finished_at=datetime.now().isoformat(timespec="seconds"),
+            current_batch=0,
+            current_batch_size=0,
+            current_download_bytes=0,
+            current_download_total=0,
+            current_download_started_at=0,
+            current_download_speed_bps=0,
+            current_download_elapsed_seconds=0,
+            stop_requested=False,
+        )
+        progress.log("Download stopped by user.")
     except Exception as exc:
         progress.update(
             status="failed",
             state_label="Failed",
             finished_at=datetime.now().isoformat(timespec="seconds"),
+            stop_requested=False,
         )
         progress.log(f"Failed: {exc}")

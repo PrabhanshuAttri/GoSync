@@ -80,9 +80,11 @@ The web UI is the default container experience. It is a small local dashboard fo
 1. Open `http://localhost:49152` when using Docker Compose, or the host port you mapped with Docker.
 2. In **HAR File**, upload the HAR export from your logged-in GoPro session.
 3. In **Download Job**, select the uploaded HAR file and click **Start Download**.
-4. Watch **Media**, **Batches**, and **Current Download** progress update live.
-5. Use **Current Activity** for the latest detailed action, such as the batch currently being processed.
-6. Use **Event Log** for a running history of uploads, retries, failures, and completed batches.
+4. Click **Stop Download** if you need to cancel the active job. GoSync stops safely, removes the temporary zip, and keeps completed IDs for resume.
+5. Watch **Media**, **Batches**, and **Current Download** progress update live.
+6. Use **Current Activity** for the latest detailed action, such as the batch currently being processed.
+7. Use **Event Log** for a running history of uploads, retries, stops, failures, and completed batches.
+8. Use the **Light** or **Dark** toggle in the header to switch themes. The browser remembers your choice.
 
 The dashboard stores uploaded HAR files in the mounted data directory. Downloaded media, the completion ledger, and temporary batch zip file also live in that same directory.
 
@@ -150,7 +152,7 @@ PYTHONPATH=src python -m gosync --data-dir ./data --run-once
 | `REQUEST_TIMEOUT_SECONDS` | `60` | HTTP request timeout for GoPro API calls. |
 | `WEB_HOST` | `0.0.0.0` | Container bind host for the web server. |
 | `WEB_PORT` | `8080` | Container port for the web server. |
-| `ACCESS_LOGS` | `false` | Set to `true` to show Flask access logs, including `/status` polling. |
+| `ACCESS_LOGS` | `true` | Set to `false` to hide Flask access logs, including `/status` polling. |
 
 Example:
 
