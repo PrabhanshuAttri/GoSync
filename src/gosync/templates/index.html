@@ -17,7 +17,11 @@
         </div>
       </div>
       <div class="topbar-actions">
-        <button id="theme-toggle" class="ghost" type="button" aria-label="Toggle color theme">Light</button>
+        <button id="theme-toggle" class="theme-toggle" type="button" role="switch" aria-checked="true" aria-label="Dark mode">
+          <span class="theme-label theme-label-light">Light</span>
+          <span class="theme-track"><span class="theme-thumb"></span></span>
+          <span class="theme-label theme-label-dark">Dark</span>
+        </button>
         <strong id="status" class="status-pill">Idle</strong>
       </div>
     </div>
@@ -51,7 +55,7 @@
             </select>
             <button id="start-button" class="secondary" type="submit" {% if not har_files %}disabled{% endif %}>Start Download</button>
           </form>
-          <form action="/stop" method="post" style="margin-top:10px">
+          <form action="/stop" method="post" class="stop-form">
             <button id="stop-button" class="danger" type="submit" disabled>Stop Download</button>
           </form>
         </section>
@@ -99,7 +103,7 @@
             </div>
             <div class="progress-row">
               <div class="label"><span>Current Download</span><span id="download-label">0 B</span></div>
-              <div class="bar"><div id="download-bar"></div></div>
+              <div class="bar download-progress"><div id="download-bar"></div></div>
             </div>
           </div>
         </section>
@@ -111,6 +115,29 @@
           </div>
           <pre class="log" id="events">Ready</pre>
         </section>
+
+        <section class="panel sidecar-table-panel">
+          <div class="panel-header">
+            <h2>Media Files</h2>
+            <span class="hint" id="sidecar-table-summary">Waiting</span>
+          </div>
+          <div class="table-wrap">
+            <table class="sidecar-table">
+              <thead>
+                <tr>
+                  <th>Filename</th>
+                  <th>Sidecar Filename</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="sidecar-table-body">
+                <tr>
+                  <td colspan="3" class="empty-cell">No media found.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </div>
   </main>
@@ -119,7 +146,8 @@
     const themeToggle = document.getElementById("theme-toggle");
     const applyTheme = (theme) => {
       document.documentElement.dataset.theme = theme;
-      themeToggle.textContent = theme === "light" ? "Dark" : "Light";
+      themeToggle.setAttribute("aria-checked", theme === "dark" ? "true" : "false");
+      themeToggle.setAttribute("aria-label", theme === "dark" ? "Dark mode" : "Light mode");
       localStorage.setItem("gosync-theme", theme);
     };
     applyTheme(localStorage.getItem("gosync-theme") || "dark");
@@ -128,7 +156,16 @@
     });
 
     const setWidth = (id, value) => {
-      document.getElementById(id).style.width = `${Math.max(0, Math.min(100, value || 0))}%`;
+      const element = document.getElementById(id);
+      element.classList.remove("indeterminate");
+      element.style.width = `${Math.max(0, Math.min(100, value || 0))}%`;
+    };
+    const setIndeterminate = (id, active) => {
+      const element = document.getElementById(id);
+      element.classList.toggle("indeterminate", active);
+      if (active) {
+        element.style.width = "";
+      }
     };
     const formatBytes = (bytes) => {
       if (!bytes) return "0 B";
@@ -148,6 +185,40 @@
       const secs = total % 60;
       const two = (value) => String(value).padStart(2, "0");
       return hrs ? `${hrs}:${two(mins)}:${two(secs)}` : `${two(mins)}:${two(secs)}`;
+    };
+    const refreshSidecarTable = async () => {
+      const res = await fetch("/sidecars");
+      const data = await res.json();
+      const body = document.getElementById("sidecar-table-body");
+      const summary = document.getElementById("sidecar-table-summary");
+      const items = data.items || [];
+      const downloadedCount = items.filter((item) => item.status === "downloaded").length;
+      summary.textContent = items.length ? `${downloadedCount} / ${items.length} downloaded` : "No media";
+
+      if (!items.length) {
+        body.innerHTML = '<tr><td colspan="3" class="empty-cell">No media found.</td></tr>';
+        return;
+      }
+
+      body.replaceChildren();
+      items.forEach((item) => {
+        const row = document.createElement("tr");
+        const filename = document.createElement("td");
+        const sidecar = document.createElement("td");
+        const statusCell = document.createElement("td");
+        const status = document.createElement("span");
+
+        filename.textContent = item.filename;
+        filename.title = item.filename;
+        sidecar.textContent = item.sidecar_filename;
+        sidecar.title = item.sidecar_filename;
+        status.className = `table-status ${item.status}`;
+        status.textContent = item.status;
+
+        statusCell.append(status);
+        row.append(filename, sidecar, statusCell);
+        body.append(row);
+      });
     };
     async function refresh() {
       const res = await fetch("/status");
@@ -184,10 +255,15 @@
           : "Waiting";
       setWidth("media-bar", data.overall_percent);
       setWidth("batch-bar", data.batch_percent);
-      setWidth("download-bar", data.download_percent);
+      if (data.current_download_bytes && !data.current_download_total) {
+        setIndeterminate("download-bar", true);
+      } else {
+        setWidth("download-bar", data.download_percent);
+      }
       document.getElementById("events").textContent = data.events.length
         ? data.events.map((event) => event.replace(/\\n/g, "\n")).join("\n")
         : "Ready";
+      await refreshSidecarTable();
     }
     async function scheduleRefresh() {
       await refresh();
