@@ -4,7 +4,7 @@ GoSync is a self-hosted Docker utility for downloading a GoPro cloud media libra
 
 GoPro Cloud limits bulk downloads to 25 items at a time. That becomes painful if you have hundreds or thousands of photos and videos, because you have to manually select, download, track, and retry many small batches. Large browser downloads can also fail partway through, leaving you unsure what finished and what still needs to be recovered.
 
-GoSync works around that workflow by reading media IDs and session headers from a browser HAR export, calling the GoPro download API directly, downloading in safe batches, extracting each batch into a mounted data directory, and recording completed IDs so interrupted runs can resume.
+GoSync works around that workflow by reading media IDs and session headers from a browser HAR export, calling the GoPro download API directly, downloading in safe batches, extracting each batch into a mounted data directory, and recording completed IDs so interrupted runs can resume. The container includes a basic web UI for uploading the HAR file, starting the download, and watching live progress.
 
 This project was inspired by [josefkeup741/gopro-cloud-rescue](https://github.com/josefkeup741/gopro-cloud-rescue).
 
@@ -36,11 +36,10 @@ GoSync reuses GoPro session headers from the HAR file. If downloads fail with `4
 
 ## Run The Project
 
-Create a data directory and place the HAR file inside it:
+Create a data directory:
 
 ```bash
 mkdir -p data
-cp /path/to/gopro.com.har data/gopro.com.har
 ```
 
 Run with Docker Compose:
@@ -49,22 +48,45 @@ Run with Docker Compose:
 docker compose up
 ```
 
-The default [docker-compose.yml](docker-compose.yml) pulls the published image and mounts `./data` into the container at `/data`.
+Open the web UI:
 
-To use a different host directory or HAR filename:
+```text
+http://localhost:49152
+```
+
+The default [docker-compose.yml](docker-compose.yml) pulls the published image, mounts `./data` into the container at `/data`, and exposes the web UI on host port `49152`.
+
+To use a different host directory or web port:
 
 ```bash
-GOSYNC_VOLUME_PATH=/mnt/media/gosync HAR_FILE=my-gopro.har docker compose up
+GOSYNC_VOLUME_PATH=/mnt/media/gosync GOSYNC_WEB_PORT=49153 docker compose up
 ```
 
 Run with plain Docker:
 
 ```bash
 docker run --rm \
-  -e HAR_FILE=gopro.com.har \
+  -p 8080:8080 \
   -v "$PWD/data:/data" \
   ghcr.io/prabhanshuattri/gosync:latest
 ```
+
+Then open `http://localhost:8080`.
+
+## Using The Web UI
+
+The web UI is the default container experience. It is a small local dashboard for managing one recovery job at a time.
+
+1. Open `http://localhost:49152` when using Docker Compose, or the host port you mapped with Docker.
+2. In **HAR File**, upload the HAR export from your logged-in GoPro session.
+3. In **Download Job**, select the uploaded HAR file and click **Start Download**.
+4. Watch **Media**, **Batches**, and **Current Download** progress update live.
+5. Use **Current Activity** for the latest detailed action, such as the batch currently being processed.
+6. Use **Event Log** for a running history of uploads, retries, failures, and completed batches.
+
+The dashboard stores uploaded HAR files in the mounted data directory. Downloaded media, the completion ledger, and temporary batch zip file also live in that same directory.
+
+If the container stops or your network drops, start GoSync again with the same data directory. The web UI will use `completed_ids.txt` to skip media that was already extracted.
 
 ## Data Directory Structure
 
@@ -95,16 +117,22 @@ Build and run the image locally when developing or testing changes:
 
 ```bash
 docker build -t gosync:local .
-docker run --rm -v "$PWD/data:/data" gosync:local
+docker run --rm -p 8080:8080 -v "$PWD/data:/data" gosync:local
 ```
 
-Run the Python script directly:
+Run the Python web UI directly:
 
 ```bash
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
-python gosync.py --data-dir ./data
+PYTHONPATH=src python -m gosync --data-dir ./data
+```
+
+Run the downloader once without the web UI:
+
+```bash
+PYTHONPATH=src python -m gosync --data-dir ./data --run-once
 ```
 
 ## Environment Configuration
@@ -112,6 +140,7 @@ python gosync.py --data-dir ./data
 | Variable | Default | Description |
 | --- | --- | --- |
 | `GOSYNC_VOLUME_PATH` | `./data` | Host path mounted to `/data` by `docker-compose.yml`. |
+| `GOSYNC_WEB_PORT` | `49152` | Host port mapped to the container web UI by `docker-compose.yml`. |
 | `DATA_DIR` | `/data` | Container path containing the HAR file, downloads, and resume ledger. |
 | `HAR_FILE` | `gopro.com.har` | HAR filename or path. Relative paths are resolved inside `DATA_DIR`. |
 | `DOWNLOAD_FOLDER` | `downloads` | Download output folder. Relative paths are resolved inside `DATA_DIR`. |
@@ -119,12 +148,15 @@ python gosync.py --data-dir ./data
 | `BATCH_SIZE` | `5` | Number of media IDs requested per zip batch. |
 | `MAX_RETRY_PASSES` | `3` | Number of retry passes for failed batches. Use `0` to retry forever. |
 | `REQUEST_TIMEOUT_SECONDS` | `60` | HTTP request timeout for GoPro API calls. |
+| `WEB_HOST` | `0.0.0.0` | Container bind host for the web server. |
+| `WEB_PORT` | `8080` | Container port for the web server. |
+| `ACCESS_LOGS` | `false` | Set to `true` to show Flask access logs, including `/status` polling. |
 
 Example:
 
 ```bash
 docker run --rm \
-  -e HAR_FILE=my-gopro.har \
+  -p 8080:8080 \
   -e DOWNLOAD_FOLDER=media \
   -e BATCH_SIZE=3 \
   -e MAX_RETRY_PASSES=0 \

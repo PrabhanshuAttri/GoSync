@@ -1,0 +1,2 @@
+"""GoSync application package."""
+

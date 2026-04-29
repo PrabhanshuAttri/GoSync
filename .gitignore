@@ -1,4 +1,5 @@
 # Python
+.codex
 __pycache__/
 *.py[cod]
 *$py.class
@@ -15,21 +16,38 @@ build/
 dist/
 *.egg-info/
 
-# GoSync local data and recovered media
+# GoSync local data, HAR exports, and recovered media
 data/
 downloads/
 GoPro_Library_Recovered/
+GoPro_Media/
 completed_ids.txt
 gopro_temp_batch.zip
 *.har
+*.har.gz
+*.zip
+*.mp4
+*.MP4
+*.jpg
+*.JPG
+*.jpeg
+*.JPEG
+*.png
+*.PNG
+*.lrv
+*.LRV
+*.thm
+*.THM
 
 # Docker/local runtime
 docker-compose.override.yml
 
-# Local environment/config
+# Local environment/config and secrets
 .env
 .env.*
 !.env.example
+*.secret
+*.token
 
 # OS/editor noise
 .DS_Store

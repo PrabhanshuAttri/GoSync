@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GoSync</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f8;
+      --surface: #ffffff;
+      --surface-strong: #f9fbfc;
+      --ink: #17212b;
+      --muted: #657386;
+      --line: #d9e0e8;
+      --brand: #0f766e;
+      --brand-dark: #115e59;
+      --blue: #2563eb;
+      --amber: #b7791f;
+      --danger: #b42318;
+      --good-bg: #e6f6f3;
+      --bad-bg: #fee4e2;
+      --shadow: 0 18px 45px rgba(24, 35, 51, .08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    button, input, select { font: inherit; }
+
+    .shell {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .topbar-inner {
+      min-height: 76px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .brand-mark {
+      width: 42px;
+      height: 42px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: linear-gradient(135deg, var(--brand), var(--blue));
+      font-weight: 800;
+      letter-spacing: 0;
+      flex: 0 0 auto;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.1;
+      letter-spacing: 0;
+    }
+
+    .brand p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 32px;
+      padding: 0 12px;
+      border-radius: 999px;
+      background: var(--good-bg);
+      color: var(--brand-dark);
+      font-weight: 700;
+      text-transform: capitalize;
+      white-space: nowrap;
+    }
+
+    .status-pill.failed {
+      background: var(--bad-bg);
+      color: var(--danger);
+    }
+
+    main {
+      padding: 24px 0 42px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .panel, .metric {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+
+    .panel {
+      padding: 18px;
+    }
+
+    .panel + .panel {
+      margin-top: 14px;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    form {
+      display: grid;
+      gap: 10px;
+    }
+
+    input[type="file"], select {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface-strong);
+      color: var(--ink);
+      padding: 8px 10px;
+    }
+
+    input[type="file"]::file-selector-button {
+      min-height: 30px;
+      margin-right: 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      font-weight: 650;
+    }
+
+    button {
+      min-height: 42px;
+      border: 0;
+      border-radius: 6px;
+      padding: 0 14px;
+      font-weight: 750;
+      color: #fff;
+      background: var(--brand);
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: var(--blue);
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+
+    .current-file {
+      margin-top: 12px;
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .current-file strong {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .metric {
+      min-height: 104px;
+      padding: 16px;
+      display: grid;
+      align-content: space-between;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 4px;
+      font-size: 26px;
+      line-height: 1.1;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .metric strong.compact {
+      font-size: 22px;
+    }
+
+    .activity {
+      border-left: 4px solid var(--brand);
+      background: linear-gradient(90deg, #eefaf7, #fff);
+    }
+
+    .activity strong {
+      display: block;
+      font-size: 18px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .activity p {
+      margin: 5px 0 0;
+      color: var(--muted);
+    }
+
+    .progress-stack {
+      display: grid;
+      gap: 16px;
+    }
+
+    .progress-row {
+      display: grid;
+      gap: 8px;
+    }
+
+    .label {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .label span:last-child {
+      color: var(--ink);
+      font-weight: 650;
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+
+    .bar {
+      height: 12px;
+      background: #e7edf3;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .bar > div {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, var(--brand), var(--blue));
+      transition: width .25s ease;
+    }
+
+    .log {
+      margin: 0;
+      min-height: 220px;
+      max-height: 320px;
+      overflow: auto;
+      white-space: pre-wrap;
+      color: #dce6f1;
+      background: #101820;
+      border-radius: 8px;
+      padding: 14px;
+      font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 18px;
+    }
+
+    @media (max-width: 880px) {
+      .workspace {
+        grid-template-columns: 1fr;
+      }
+
+      .metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 600px) {
+      .shell {
+        width: min(100% - 22px, 1180px);
+      }
+
+      .topbar-inner {
+        min-height: auto;
+        padding: 16px 0;
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .brand-mark {
+        width: 38px;
+        height: 38px;
+      }
+
+      .brand h1 {
+        font-size: 22px;
+      }
+
+      main {
+        padding-top: 14px;
+      }
+
+      .panel {
+        padding: 14px;
+      }
+
+      .metrics {
+        grid-template-columns: 1fr;
+      }
+
+      .metric {
+        min-height: 86px;
+      }
+
+      .metric strong {
+        font-size: 25px;
+      }
+
+      .label {
+        display: grid;
+        gap: 2px;
+      }
+
+      .label span:last-child {
+        text-align: left;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div class="brand">
+        <div class="brand-mark">GS</div>
+        <div>
+          <h1>GoSync</h1>
+          <p>GoPro cloud library recovery</p>
+        </div>
+      </div>
+      <strong id="status" class="status-pill">Idle</strong>
+    </div>
+  </header>
+
+  <main class="shell">
+    <div class="workspace">
+      <aside>
+        <section class="panel">
+          <div class="panel-header">
+            <h2>HAR File</h2>
+            <span class="hint">Session source</span>
+          </div>
+          <form action="/upload" method="post" enctype="multipart/form-data">
+            <input type="file" name="har_file" accept=".har,application/json" required>
+            <button type="submit">Upload HAR</button>
+          </form>
+          <span class="current-file">Current: <strong>{{ har_file }}</strong></span>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Download Job</h2>
+            <span class="hint">One active job</span>
+          </div>
+          <form action="/start" method="post">
+            <select name="har_file">
+              {% for file in har_files %}
+              <option value="{{ file }}" {% if file == har_file %}selected{% endif %}>{{ file }}</option>
+              {% endfor %}
+            </select>
+            <button class="secondary" type="submit" {% if not har_files %}disabled{% endif %}>Start Download</button>
+          </form>
+        </section>
+      </aside>
+
+      <div class="split">
+        <div class="metrics">
+          <div class="metric">
+            <span>Media</span>
+            <strong id="overall">0%</strong>
+          </div>
+          <div class="metric">
+            <span>Batches</span>
+            <strong id="batches">0 / 0</strong>
+          </div>
+          <div class="metric">
+            <span>State</span>
+            <strong id="message" class="compact">Ready</strong>
+          </div>
+        </div>
+
+        <section class="panel activity">
+          <h2>Current Activity</h2>
+          <strong id="activity-message">Ready</strong>
+          <p id="activity-detail">Waiting for a download job.</p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Progress</h2>
+            <span class="hint" id="download-meta">Waiting</span>
+          </div>
+          <div class="progress-stack">
+            <div class="progress-row">
+              <div class="label"><span>Media</span><span id="media-label">0 / 0</span></div>
+              <div class="bar"><div id="media-bar"></div></div>
+            </div>
+            <div class="progress-row">
+              <div class="label"><span>Batches</span><span id="batch-label">0 / 0</span></div>
+              <div class="bar"><div id="batch-bar"></div></div>
+            </div>
+            <div class="progress-row">
+              <div class="label"><span>Current Download</span><span id="download-label">0 B</span></div>
+              <div class="bar"><div id="download-bar"></div></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Event Log</h2>
+            <span class="hint">Latest events</span>
+          </div>
+          <pre class="log" id="events">Ready</pre>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const setWidth = (id, value) => {
+      document.getElementById(id).style.width = `${Math.max(0, Math.min(100, value || 0))}%`;
+    };
+    const formatBytes = (bytes) => {
+      if (!bytes) return "0 B";
+      const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+      let value = bytes;
+      let index = 0;
+      while (value >= 1024 && index < units.length - 1) {
+        value /= 1024;
+        index += 1;
+      }
+      return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
+    };
+    const formatElapsed = (seconds) => {
+      const total = Math.max(0, Math.floor(seconds || 0));
+      const hrs = Math.floor(total / 3600);
+      const mins = Math.floor((total % 3600) / 60);
+      const secs = total % 60;
+      const two = (value) => String(value).padStart(2, "0");
+      return hrs ? `${hrs}:${two(mins)}:${two(secs)}` : `${two(mins)}:${two(secs)}`;
+    };
+    async function refresh() {
+      const res = await fetch("/status");
+      const data = await res.json();
+      document.getElementById("overall").textContent = `${data.overall_percent}%`;
+      document.getElementById("batches").textContent = `${data.completed_batches} / ${data.total_batches}`;
+      const status = document.getElementById("status");
+      status.textContent = data.status;
+      status.className = `status-pill ${data.status}`;
+      document.getElementById("message").textContent = data.state_label || data.status || "Ready";
+      document.getElementById("activity-message").textContent = data.message || "Ready";
+      document.getElementById("activity-detail").textContent =
+        data.current_batch
+          ? `Batch ${data.current_batch} of ${data.total_batches} · ${data.current_batch_size} file(s)`
+          : data.output_dir
+            ? `Output: ${data.output_dir}`
+            : "Waiting for a download job.";
+      document.getElementById("media-label").textContent = `${data.completed_ids} / ${data.total_ids}`;
+      document.getElementById("batch-label").textContent = `${data.completed_batches} / ${data.total_batches}`;
+      document.getElementById("download-label").textContent =
+        data.current_download_total
+          ? `${formatBytes(data.current_download_bytes)} / ${formatBytes(data.current_download_total)}`
+          : `${formatBytes(data.current_download_bytes)}`;
+      document.getElementById("download-meta").textContent =
+        data.current_download_bytes
+          ? `${formatBytes(data.current_download_speed_bps)}/s · ${formatElapsed(data.current_download_elapsed_seconds)}`
+          : "Waiting";
+      setWidth("media-bar", data.overall_percent);
+      setWidth("batch-bar", data.batch_percent);
+      setWidth("download-bar", data.download_percent);
+      document.getElementById("events").textContent = data.events.length
+        ? data.events.map((event) => event.replace(/\\n/g, "\n")).join("\n")
+        : "Ready";
+    }
+    async function scheduleRefresh() {
+      await refresh();
+      const status = document.getElementById("status").textContent;
+      const delay = status === "running" ? 1500 : 5000;
+      setTimeout(scheduleRefresh, delay);
+    }
+    scheduleRefresh();
+  </script>
+</body>
+</html>
