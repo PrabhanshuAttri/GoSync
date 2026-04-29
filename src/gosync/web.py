@@ -21,9 +21,22 @@ JOB_LOCK = threading.Lock()
 RESUME_CACHE: dict[str, object] = {}
 
 
+class StatusAccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return '"GET /status ' not in message and '"GET /status?' not in message
+
+
 def create_app(args: argparse.Namespace) -> Flask:
+    werkzeug_logger = logging.getLogger("werkzeug")
     if not ACCESS_LOGS:
-        logging.getLogger("werkzeug").setLevel(logging.ERROR)
+        werkzeug_logger.setLevel(logging.ERROR)
+    elif IS_PROD:
+        if not any(
+            isinstance(log_filter, StatusAccessLogFilter)
+            for log_filter in werkzeug_logger.filters
+        ):
+            werkzeug_logger.addFilter(StatusAccessLogFilter())
 
     app = Flask(__name__)
     data_dir = Path(args.data_dir).expanduser().resolve()
@@ -84,6 +97,37 @@ def create_app(args: argparse.Namespace) -> Flask:
             )
         except Exception:
             return
+
+    def media_sidecar_rows() -> list[dict[str, str]]:
+        output_dir = resolve_inside_data_dir(data_dir, args.output_folder).resolve()
+        sidecar_dir = resolve_inside_data_dir(data_dir, args.sidecar_folder).resolve()
+        downloaded_files = {
+            path.name: path
+            for path in output_dir.iterdir()
+            if path.is_file() and path.name != "completed_ids.txt"
+        } if output_dir.exists() else {}
+        sidecar_files = {
+            path.name.removesuffix(".xmp"): path
+            for path in sidecar_dir.glob("*.xmp")
+            if path.is_file()
+        } if sidecar_dir.exists() else {}
+
+        rows = []
+        filenames = set(downloaded_files).union(sidecar_files)
+        for filename in sorted(
+            filenames,
+            key=lambda name: (name in downloaded_files, name.lower()),
+        ):
+            sidecar_path = sidecar_files.get(filename)
+            downloaded = filename in downloaded_files
+            rows.append(
+                {
+                    "filename": filename,
+                    "sidecar_filename": sidecar_path.name if sidecar_path else "",
+                    "status": "downloaded" if downloaded else "pending",
+                }
+            )
+        return rows
 
     @app.get("/")
     def index():
@@ -168,5 +212,9 @@ def create_app(args: argparse.Namespace) -> Flask:
     def status():
         refresh_resume_counts()
         return jsonify(PROGRESS.snapshot())
+
+    @app.get("/sidecars")
+    def sidecars():
+        return jsonify({"items": media_sidecar_rows()})
 
     return app
