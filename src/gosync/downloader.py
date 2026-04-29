@@ -1,6 +1,4 @@
-import argparse
 import json
-import os
 import re
 import time
 import zipfile
@@ -10,6 +8,9 @@ import requests
 from requests.adapters import HTTPAdapter
 from requests.exceptions import ChunkedEncodingError, ConnectionError, ReadTimeout
 from urllib3.util.retry import Retry
+
+from gosync.config import REQUEST_TIMEOUT
+from gosync.progress import ProgressState
 
 try:
     from tqdm import tqdm
@@ -28,15 +29,6 @@ except ImportError:
             return None
 
 
-DEFAULT_DATA_DIR = os.getenv("DATA_DIR", "/data")
-DEFAULT_OUTPUT_FOLDER = os.getenv(
-    "DOWNLOAD_FOLDER",
-    os.getenv("OUTPUT_FOLDER", "downloads"),
-)
-DEFAULT_COMPLETED_LOG = os.getenv("COMPLETED_LOG", "completed_ids.txt")
-DEFAULT_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))
-DEFAULT_MAX_RETRY_PASSES = int(os.getenv("MAX_RETRY_PASSES", "3"))
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
 ZIP_URL_PREFIX = "https://api.gopro.com/media/x/zip/source"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -232,6 +224,7 @@ def download_batch(
     batch: list[str],
     temp_zip: Path,
     headers: dict[str, str],
+    progress: ProgressState | None = None,
 ) -> None:
     batch_str = ",".join(batch)
     url = f"{ZIP_URL_PREFIX}?ids={batch_str}"
@@ -245,6 +238,15 @@ def download_batch(
         ) as response:
             response.raise_for_status()
             total_size = int(response.headers.get("content-length", 0))
+            download_started_at = time.monotonic()
+            if progress:
+                progress.update(
+                    current_download_bytes=0,
+                    current_download_total=total_size,
+                    current_download_started_at=download_started_at,
+                    current_download_speed_bps=0,
+                    current_download_elapsed_seconds=0,
+                )
 
             with temp_zip.open("wb") as file, tqdm(
                 desc="Downloading",
@@ -257,6 +259,15 @@ def download_batch(
                     if chunk:
                         file.write(chunk)
                         progress_bar.update(len(chunk))
+                        if progress:
+                            progress.increment("current_download_bytes", len(chunk))
+                            elapsed = max(time.monotonic() - download_started_at, 0.001)
+                            progress.update(
+                                current_download_elapsed_seconds=elapsed,
+                                current_download_speed_bps=(
+                                    progress.current_download_bytes / elapsed
+                                ),
+                            )
     except RETRYABLE_DOWNLOAD_ERRORS as exc:
         raise RuntimeError(f"Retryable download error: {exc}") from exc
 
@@ -269,6 +280,7 @@ def process_pipeline(
     headers: dict[str, str],
     batch_size: int,
     max_retry_passes: int,
+    progress: ProgressState | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     temp_zip = data_dir / "gopro_temp_batch.zip"
@@ -276,14 +288,28 @@ def process_pipeline(
 
     completed_ids = get_completed_ids(completed_log)
     pending_ids = [media_id for media_id in all_ids if media_id not in completed_ids]
+    completed_count = len(completed_ids.intersection(all_ids))
+    if progress:
+        progress.update(
+            total_ids=len(all_ids),
+            completed_ids=completed_count,
+            pending_ids=len(pending_ids),
+            output_dir=str(output_dir),
+        )
 
     if not pending_ids:
-        print(f"\nAll {len(all_ids)} media files have already been downloaded.", flush=True)
+        message = f"All {len(all_ids)} media files have already been downloaded."
+        if progress:
+            progress.log(message)
+        else:
+            print(f"\n{message}", flush=True)
         return
 
     print(f"\n--- STEP 2: Processing {len(pending_ids)} remaining files ---", flush=True)
     pending_batches = build_batches(pending_ids, batch_size)
     pass_number = 1
+    if progress:
+        progress.update(total_batches=len(pending_batches), completed_batches=0)
 
     while pending_batches:
         if max_retry_passes and pass_number > max_retry_passes:
@@ -301,14 +327,26 @@ def process_pipeline(
         failed_batches: list[list[str]] = []
 
         for index, batch in enumerate(pending_batches, start=1):
-            print(
-                f"\nProcessing batch {index} of {len(pending_batches)} "
-                f"({len(batch)} file(s))...",
-                flush=True,
+            message = (
+                f"Processing batch {index} of {len(pending_batches)} "
+                f"({len(batch)} file(s))..."
             )
+            if progress:
+                progress.update(
+                    current_batch=index,
+                    current_batch_size=len(batch),
+                    current_download_bytes=0,
+                    current_download_total=0,
+                    current_download_started_at=0,
+                    current_download_speed_bps=0,
+                    current_download_elapsed_seconds=0,
+                )
+                progress.log(message)
+            else:
+                print(f"\n{message}", flush=True)
 
             try:
-                download_batch(session, batch, temp_zip, headers)
+                download_batch(session, batch, temp_zip, headers, progress)
 
                 try:
                     with zipfile.ZipFile(temp_zip) as zip_ref:
@@ -322,10 +360,29 @@ def process_pipeline(
 
                 temp_zip.unlink(missing_ok=True)
                 log_completed_ids(completed_log, batch)
-                print("Batch extracted and logged.", flush=True)
+                completed_count += len(batch)
+                if progress:
+                    progress.update(
+                        completed_ids=completed_count,
+                        pending_ids=max(len(all_ids) - completed_count, 0),
+                        current_download_bytes=0,
+                        current_download_total=0,
+                        current_download_started_at=0,
+                        current_download_speed_bps=0,
+                        current_download_elapsed_seconds=0,
+                    )
+                    progress.increment("completed_batches", 1)
+                    progress.log("Batch extracted and logged.")
+                else:
+                    print("Batch extracted and logged.", flush=True)
 
             except Exception as exc:
-                print(f"Batch failed; queued for retry: {exc}", flush=True)
+                message = f"Batch failed; queued for retry: {exc}"
+                if progress:
+                    progress.increment("failed_batches", 1)
+                    progress.log(message)
+                else:
+                    print(message, flush=True)
                 temp_zip.unlink(missing_ok=True)
                 failed_batches.append(batch)
                 time.sleep(2)
@@ -338,88 +395,3 @@ def process_pipeline(
             time.sleep(5)
 
     print(f"\nDone. Recovered media is in {output_dir}.", flush=True)
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Download and recover GoPro cloud media from a HAR file."
-    )
-    parser.add_argument(
-        "--data-dir",
-        default=DEFAULT_DATA_DIR,
-        help="Mounted directory containing the HAR file and receiving output.",
-    )
-    parser.add_argument(
-        "--har-file",
-        default=os.getenv("HAR_FILE"),
-        help="HAR filename or path. Defaults to gopro.com.har, then any single *.har file.",
-    )
-    parser.add_argument(
-        "--output-folder",
-        default=DEFAULT_OUTPUT_FOLDER,
-        help="Download folder name or path. Relative paths are created inside data-dir.",
-    )
-    parser.add_argument(
-        "--completed-log",
-        default=DEFAULT_COMPLETED_LOG,
-        help="Completion ledger name or path. Relative paths are created inside data-dir.",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=DEFAULT_BATCH_SIZE,
-        help="Number of media IDs to request in each zip batch.",
-    )
-    parser.add_argument(
-        "--max-retry-passes",
-        type=int,
-        default=DEFAULT_MAX_RETRY_PASSES,
-        help="Maximum retry passes for failed batches. Use 0 to retry forever.",
-    )
-    return parser.parse_args()
-
-
-def resolve_inside_data_dir(data_dir: Path, value: str) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return data_dir / path
-
-
-def main() -> int:
-    args = parse_args()
-    data_dir = Path(args.data_dir).expanduser().resolve()
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    if args.batch_size < 1:
-        raise ValueError("--batch-size must be at least 1")
-
-    har_path = resolve_har_file(data_dir, args.har_file)
-    output_dir = resolve_inside_data_dir(data_dir, args.output_folder).resolve()
-    completed_log = resolve_inside_data_dir(data_dir, args.completed_log).resolve()
-
-    print("========================================", flush=True)
-    print("             GoSync Utility             ", flush=True)
-    print("========================================", flush=True)
-    print(f"Data directory: {data_dir}", flush=True)
-    print(f"HAR file: {har_path}", flush=True)
-    print(f"Output folder: {output_dir}", flush=True)
-    print(f"Completed log: {completed_log}", flush=True)
-    print(f"Batch size: {args.batch_size}", flush=True)
-
-    ids = extract_ids(har_path)
-    headers = extract_browser_headers(har_path)
-    process_pipeline(
-        all_ids=ids,
-        data_dir=data_dir,
-        output_dir=output_dir,
-        completed_log=completed_log,
-        headers=headers,
-        batch_size=args.batch_size,
-        max_retry_passes=args.max_retry_passes,
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
