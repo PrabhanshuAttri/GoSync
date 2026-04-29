@@ -11,7 +11,13 @@ This project was inspired by [josefkeup741/gopro-cloud-rescue](https://github.co
 Published image:
 
 ```text
-ghcr.io/prabhanshuattri/gosync:latest
+ghcr.io/prabhanshuattri/gosync:1.0.1
+```
+
+Current app version:
+
+```text
+1.0.1
 ```
 
 ## Requirements
@@ -54,7 +60,7 @@ Open the web UI:
 http://localhost:49152
 ```
 
-The default [docker-compose.yml](docker-compose.yml) pulls the published image, mounts `./data` into the container at `/data`, and exposes the web UI on host port `49152`.
+The default [docker-compose.yml](docker-compose.yml) pulls the versioned published image, mounts `./data` into the container at `/data`, and exposes the web UI on host port `49152`.
 
 To use a different host directory or web port:
 
@@ -68,7 +74,7 @@ Run with plain Docker:
 docker run --rm \
   -p 8080:8080 \
   -v "$PWD/data:/data" \
-  ghcr.io/prabhanshuattri/gosync:latest
+  ghcr.io/prabhanshuattri/gosync:1.0.1
 ```
 
 Then open `http://localhost:8080`.
@@ -139,6 +145,12 @@ pip install -r requirements.txt
 PYTHONPATH=src python -m gosync --data-dir ./data
 ```
 
+Print the app version:
+
+```bash
+PYTHONPATH=src python -m gosync --version
+```
+
 Run the downloader once without the web UI:
 
 ```bash
@@ -172,5 +184,5 @@ docker run --rm \
   -e BATCH_SIZE=3 \
   -e MAX_RETRY_PASSES=0 \
   -v "$PWD/data:/data" \
-  ghcr.io/prabhanshuattri/gosync:latest
+  ghcr.io/prabhanshuattri/gosync:1.0.1
 ```

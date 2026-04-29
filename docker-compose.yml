@@ -1,7 +1,23 @@
+name: gosync
+
+x-portals:
+  - host: 0.0.0.0
+    name: Web UI
+    path: /
+    port: ${GOSYNC_WEB_PORT:-49152}
+    scheme: http
+
 services:
   gosync:
-    image: ghcr.io/prabhanshuattri/gosync:latest
+    image: ghcr.io/prabhanshuattri/gosync:${GOSYNC_IMAGE_TAG:-1.0.1}
     container_name: gosync
+    labels:
+      org.opencontainers.image.title: GoSync
+      org.opencontainers.image.description: GoPro cloud library recovery and downloader
+      org.opencontainers.image.source: https://github.com/prabhanshuattri/GoSync
+      org.opencontainers.image.url: https://github.com/prabhanshuattri/GoSync
+      org.opencontainers.image.vendor: prabhanshuattri
+      org.opencontainers.image.version: ${GOSYNC_VERSION:-1.0.1}
     environment:
       ENV: ${ENV:-dev}
       DATA_DIR: /data
