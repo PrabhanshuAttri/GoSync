@@ -1,0 +1,9 @@
+.git
+.codex
+data
+GoPro_Library_Recovered
+completed_ids.txt
+gopro_temp_batch.zip
+__pycache__
+*.pyc
+*.har
