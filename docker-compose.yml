@@ -1,0 +1,14 @@
+services:
+  gosync:
+    image: ghcr.io/prabhanshuattri/gosync:latest
+    container_name: gosync
+    environment:
+      DATA_DIR: /data
+      HAR_FILE: ${HAR_FILE:-gopro.com.har}
+      DOWNLOAD_FOLDER: ${DOWNLOAD_FOLDER:-downloads}
+      COMPLETED_LOG: ${COMPLETED_LOG:-completed_ids.txt}
+      BATCH_SIZE: ${BATCH_SIZE:-5}
+      MAX_RETRY_PASSES: ${MAX_RETRY_PASSES:-3}
+    volumes:
+      - ${GOSYNC_VOLUME_PATH:-./data}:/data
+    restart: "no"
