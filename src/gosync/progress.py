@@ -23,6 +23,10 @@ class ProgressState:
     current_download_speed_bps: float = 0
     current_download_elapsed_seconds: float = 0
     output_dir: str = ""
+    sidecar_dir: str = ""
+    sidecar_status: str = "idle"
+    sidecar_count: int = 0
+    sidecar_message: str = ""
     har_file: str = ""
     started_at: str = ""
     finished_at: str = ""
@@ -42,6 +46,13 @@ class ProgressState:
         timestamp = datetime.now().strftime("%H:%M:%S")
         with self.lock:
             self.message = message
+            self.events.append(f"[{timestamp}] {message}")
+            self.events = self.events[-80:]
+        print(message, flush=True)
+
+    def log_background(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        with self.lock:
             self.events.append(f"[{timestamp}] {message}")
             self.events = self.events[-80:]
         print(message, flush=True)
@@ -94,6 +105,10 @@ class ProgressState:
                 if current_total
                 else 0,
                 "output_dir": self.output_dir,
+                "sidecar_dir": self.sidecar_dir,
+                "sidecar_status": self.sidecar_status,
+                "sidecar_count": self.sidecar_count,
+                "sidecar_message": self.sidecar_message,
                 "har_file": self.har_file,
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
