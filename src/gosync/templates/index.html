@@ -237,6 +237,7 @@
       return hrs ? `${hrs}:${two(mins)}:${two(secs)}` : `${two(mins)}:${two(secs)}`;
     };
     const seenNotifications = new Set();
+    let notificationHistoryLoaded = false;
     const showNotification = (notification) => {
       if (!notification.id || seenNotifications.has(notification.id)) return;
       seenNotifications.add(notification.id);
@@ -331,7 +332,15 @@
         ? data.events.map((event) => event.replace(/\\n/g, "\n")).join("\n")
         : "Ready";
       events.scrollTop = events.scrollHeight;
-      (data.notifications || []).forEach(showNotification);
+      const notifications = data.notifications || [];
+      if (!notificationHistoryLoaded) {
+        notifications.forEach((notification) => {
+          if (notification.id) seenNotifications.add(notification.id);
+        });
+        notificationHistoryLoaded = true;
+      } else {
+        notifications.forEach(showNotification);
+      }
       await refreshSidecarTable();
     }
     async function scheduleRefresh() {

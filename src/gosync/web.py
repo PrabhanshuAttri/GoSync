@@ -10,6 +10,7 @@ from gosync import __version__
 from gosync.config import IS_PROD, ACCESS_LOGS
 from gosync.config import resolve_inside_data_dir
 from gosync.downloader import extract_ids, get_completed_ids
+from gosync.logging_config import LOGGER, configure_file_logging
 from gosync.progress import ProgressState
 from gosync.runtime import run_download_job
 from gosync.sidecar import read_media_from_har, run_sidecar_job, sidecar_stem
@@ -34,6 +35,11 @@ class StatusAccessLogFilter(logging.Filter):
 
 
 def create_app(args: argparse.Namespace) -> Flask:
+    data_dir = Path(args.data_dir).expanduser().resolve()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    log_file = configure_file_logging(data_dir)
+    LOGGER.info("File logging enabled at %s", log_file)
+
     werkzeug_logger = logging.getLogger("werkzeug")
     if not ACCESS_LOGS:
         werkzeug_logger.setLevel(logging.ERROR)
@@ -45,8 +51,7 @@ def create_app(args: argparse.Namespace) -> Flask:
             werkzeug_logger.addFilter(StatusAccessLogFilter())
 
     app = Flask(__name__)
-    data_dir = Path(args.data_dir).expanduser().resolve()
-    data_dir.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("Starting GoSync web app. data_dir=%s", data_dir)
 
     def list_har_files() -> list[str]:
         return sorted(path.name for path in data_dir.glob("*.har"))

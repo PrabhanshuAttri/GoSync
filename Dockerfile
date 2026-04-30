@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-ARG GOSYNC_VERSION=1.0.1
+ARG GOSYNC_VERSION=1.0.2
 
 LABEL org.opencontainers.image.title="GoSync"
 LABEL org.opencontainers.image.description="Self-hosted GoPro cloud media recovery from a browser HAR export"

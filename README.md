@@ -13,13 +13,13 @@ GoSync is a vibe-coded, AI-assisted utility built around a real recovery need.
 Published image:
 
 ```text
-ghcr.io/prabhanshuattri/gosync:1.0.1
+ghcr.io/prabhanshuattri/gosync:1.0.2
 ```
 
 Current app version:
 
 ```text
-1.0.1
+1.0.2
 ```
 
 ## Screenshot
@@ -80,7 +80,7 @@ Run with plain Docker:
 docker run --rm \
   -p 8080:8080 \
   -v "$PWD/data:/data" \
-  ghcr.io/prabhanshuattri/gosync:1.0.1
+  ghcr.io/prabhanshuattri/gosync:1.0.2
 ```
 
 Then open `http://localhost:8080`.
@@ -192,5 +192,5 @@ docker run --rm \
   -e BATCH_SIZE=3 \
   -e MAX_RETRY_PASSES=0 \
   -v "$PWD/data:/data" \
-  ghcr.io/prabhanshuattri/gosync:1.0.1
+  ghcr.io/prabhanshuattri/gosync:1.0.2
 ```
