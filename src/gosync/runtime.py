@@ -76,11 +76,10 @@ def run_download_job(
         data_dir, har_path, output_dir, completed_log = get_runtime_paths(args)
         progress.update(
             status="running",
-            state_label="Running",
+            state_label="Processing",
             stop_requested=False,
             started_at=datetime.now().isoformat(timespec="seconds"),
             finished_at="",
-            notifications=[],
             total_ids=0,
             completed_ids=0,
             pending_ids=0,
@@ -112,7 +111,7 @@ def run_download_job(
         )
         progress.update(
             status="complete",
-            state_label="Complete",
+            state_label="Completed",
             finished_at=datetime.now().isoformat(timespec="seconds"),
             current_batch=0,
             current_batch_size=0,

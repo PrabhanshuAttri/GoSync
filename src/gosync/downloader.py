@@ -58,6 +58,10 @@ RETRYABLE_DOWNLOAD_ERRORS = (
     ReadTimeout,
 )
 
+
+def pluralize(count: int, singular: str, plural: str | None = None) -> str:
+    return singular if count == 1 else plural or f"{singular}s"
+
 ID_PATTERNS = (
     re.compile(r'\\"id\\":\\"([a-zA-Z0-9]{13})\\"'),
     re.compile(r'"id"\s*:\s*"([a-zA-Z0-9]{13})"'),
@@ -245,6 +249,7 @@ def download_batch(
             download_started_at = time.monotonic()
             if progress:
                 progress.update(
+                    state_label="Downloading",
                     current_download_bytes=0,
                     current_download_total=total_size,
                     current_download_started_at=download_started_at,
@@ -341,10 +346,11 @@ def process_pipeline(
 
             message = (
                 f"Processing batch {index} of {len(pending_batches)} "
-                f"({len(batch)} file(s))..."
+                f"({len(batch)} {pluralize(len(batch), 'file')})"
             )
             if progress:
                 progress.update(
+                    state_label="Processing",
                     current_batch=index,
                     current_batch_size=len(batch),
                     current_download_bytes=0,
@@ -365,6 +371,15 @@ def process_pipeline(
                         bad_file = zip_ref.testzip()
                         if bad_file:
                             raise RuntimeError(f"Corrupt file inside zip archive: {bad_file}")
+                        if progress:
+                            progress.update(
+                                state_label="Extracting",
+                                current_download_bytes=0,
+                                current_download_total=0,
+                                current_download_started_at=0,
+                                current_download_speed_bps=0,
+                                current_download_elapsed_seconds=0,
+                            )
                         print(f"Extracting to {output_dir}...", flush=True)
                         safe_extract(zip_ref, output_dir)
                 except zipfile.BadZipFile as exc:
@@ -384,11 +399,11 @@ def process_pipeline(
                         current_download_elapsed_seconds=0,
                     )
                     progress.increment("completed_batches", 1)
-                    progress.log("Batch extracted and logged.")
+                    progress.log_background("Batch extracted and logged.")
                     progress.notify(
                         "success",
                         "Batch complete",
-                        f"{len(batch)} file(s) downloaded and logged.",
+                        f"{len(batch)} {pluralize(len(batch), 'file')} downloaded and logged.",
                     )
                 else:
                     print("Batch extracted and logged.", flush=True)
@@ -408,7 +423,7 @@ def process_pipeline(
                     progress.notify(
                         "error",
                         "Batch failed",
-                        f"{len(batch)} file(s) queued for retry. {exc}",
+                        f"{len(batch)} {pluralize(len(batch), 'file')} queued for retry. {exc}",
                     )
                 else:
                     print(message, flush=True)
