@@ -151,6 +151,13 @@ pip install -r requirements.txt
 PYTHONPATH=src python -m gosync --data-dir ./data
 ```
 
+Flask debug mode is disabled by default, including for local direct runs. Set
+`ENV=dev` only when actively developing:
+
+```bash
+ENV=dev PYTHONPATH=src python -m gosync --data-dir ./data
+```
+
 Print the app version:
 
 ```bash
@@ -179,6 +186,7 @@ PYTHONPATH=src python -m gosync --data-dir ./data --run-once
 | `BATCH_SIZE` | `5` | Number of media IDs requested per zip batch. |
 | `MAX_RETRY_PASSES` | `3` | Number of retry passes for failed batches. Use `0` to retry forever. |
 | `REQUEST_TIMEOUT_SECONDS` | `60` | HTTP request timeout for GoPro API calls. |
+| `ENV` | `production` | Runtime environment. Set to `dev` or `development` to enable Flask debug mode. |
 | `WEB_HOST` | `0.0.0.0` | Container bind host for the web server. |
 | `WEB_PORT` | `8080` | Container port for the web server. |
 | `ACCESS_LOGS` | `true` | Set to `false` to hide Flask access logs, including `/status` polling. |
