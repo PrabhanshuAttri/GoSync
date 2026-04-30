@@ -5,9 +5,9 @@ from pathlib import Path
 from gosync import __version__
 
 
-ENV = os.getenv("ENV", "dev").lower()
+ENV = os.getenv("ENV", "production").lower()
 IS_PROD = ENV in {"prod", "production"}
-DEBUG = not IS_PROD
+DEBUG = ENV in {"dev", "development"}
 DEFAULT_DATA_DIR = os.getenv("DATA_DIR", "/data")
 DEFAULT_OUTPUT_FOLDER = os.getenv(
     "DOWNLOAD_FOLDER",

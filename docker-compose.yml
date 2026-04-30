@@ -19,7 +19,7 @@ services:
       org.opencontainers.image.vendor: prabhanshuattri
       org.opencontainers.image.version: ${GOSYNC_VERSION:-1.0.2}
     environment:
-      ENV: ${ENV:-dev}
+      ENV: ${ENV:-production}
       DATA_DIR: /data
       HAR_FILE: ${HAR_FILE:-gopro.com.har}
       DOWNLOAD_FOLDER: ${DOWNLOAD_FOLDER:-downloads}
