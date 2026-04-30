@@ -10,6 +10,7 @@ from gosync.downloader import (
     process_pipeline,
     resolve_har_file,
 )
+from gosync.logging_config import LOGGER, configure_file_logging
 from gosync.progress import ProgressState
 
 
@@ -28,6 +29,7 @@ def get_runtime_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]
 
 def run_once(args: argparse.Namespace) -> int:
     data_dir, har_path, output_dir, completed_log = get_runtime_paths(args)
+    log_file = configure_file_logging(data_dir)
 
     print("========================================", flush=True)
     print("             GoSync Utility             ", flush=True)
@@ -37,6 +39,15 @@ def run_once(args: argparse.Namespace) -> int:
     print(f"Output folder: {output_dir}", flush=True)
     print(f"Completed log: {completed_log}", flush=True)
     print(f"Batch size: {args.batch_size}", flush=True)
+    LOGGER.info("File logging enabled at %s", log_file)
+    LOGGER.info(
+        "Starting run-once download. data_dir=%s har_file=%s output_dir=%s completed_log=%s batch_size=%s",
+        data_dir,
+        har_path,
+        output_dir,
+        completed_log,
+        args.batch_size,
+    )
 
     ids = extract_ids(har_path)
     headers = extract_browser_headers(har_path)
@@ -49,6 +60,7 @@ def run_once(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         max_retry_passes=args.max_retry_passes,
     )
+    LOGGER.info("Run-once download completed.")
     return 0
 
 
@@ -130,4 +142,5 @@ def run_download_job(
             finished_at=datetime.now().isoformat(timespec="seconds"),
             stop_requested=False,
         )
+        LOGGER.exception("Download job failed.")
         progress.log(f"Failed: {exc}")

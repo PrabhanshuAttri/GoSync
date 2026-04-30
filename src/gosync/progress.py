@@ -1,6 +1,10 @@
+import logging
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
+
+
+LOGGER = logging.getLogger("gosync.progress")
 
 
 @dataclass
@@ -49,6 +53,7 @@ class ProgressState:
             self.message = message
             self.events.append(f"[{timestamp}] {message}")
             self.events = self.events[-80:]
+        LOGGER.info(message)
         print(message, flush=True)
 
     def log_background(self, message: str) -> None:
@@ -56,6 +61,7 @@ class ProgressState:
         with self.lock:
             self.events.append(f"[{timestamp}] {message}")
             self.events = self.events[-80:]
+        LOGGER.info(message)
         print(message, flush=True)
 
     def log_event(self, message: str, state_label: str | None = None) -> None:
@@ -66,6 +72,7 @@ class ProgressState:
                 self.state_label = state_label
             self.events.append(f"[{timestamp}] {message}")
             self.events = self.events[-80:]
+        LOGGER.info(message)
         print(message, flush=True)
 
     def notify(self, level: str, title: str, message: str) -> None:
