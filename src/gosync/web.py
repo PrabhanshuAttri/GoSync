@@ -224,6 +224,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                 args.sidecar_folder,
             ).resolve()
             PROGRESS.update(
+                notifications=[],
                 sidecar_status="pending",
                 sidecar_count=0,
                 sidecar_dir=str(sidecar_dir),

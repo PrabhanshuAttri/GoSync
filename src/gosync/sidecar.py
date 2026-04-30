@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import re
 import sys
 from datetime import datetime
@@ -9,6 +10,8 @@ from xml.sax.saxutils import escape
 
 from gosync.progress import ProgressState
 
+
+LOGGER = logging.getLogger("gosync.sidecar")
 
 MEDIA_SEARCH_URL = "https://api.gopro.com/media/search"
 MEDIA_LIST_KEYS = ("media", "items", "data")
@@ -397,7 +400,8 @@ def run_sidecar_job(
                 sidecar_dir=str(output_dir),
                 sidecar_message=message,
             )
-            progress.log_background(message)
+            LOGGER.info(message)
+            progress.notify("info", "XMP sidecars", "Generating XMP sidecar files.")
 
         written, matching_entries = generate_sidecars_from_har(
             har_path,
@@ -405,9 +409,11 @@ def run_sidecar_job(
         )
 
         if progress:
+            file_label = "file" if written == 1 else "files"
+            response_label = "response" if matching_entries == 1 else "responses"
             message = (
-                f"Generated {written} XMP sidecar file(s) from "
-                f"{matching_entries} media/search response(s)."
+                f"Generated {written} XMP sidecar {file_label} from "
+                f"{matching_entries} media/search {response_label}."
             )
             progress.update(
                 sidecar_status="complete",
@@ -415,7 +421,12 @@ def run_sidecar_job(
                 sidecar_dir=str(output_dir),
                 sidecar_message=message,
             )
-            progress.log_background(message)
+            LOGGER.info(message)
+            progress.notify(
+                "success",
+                "XMP sidecars complete",
+                f"Generated {written} XMP sidecar {file_label}.",
+            )
     except Exception as exc:
         if progress:
             message = f"XMP sidecar generation failed: {exc}"
@@ -424,6 +435,7 @@ def run_sidecar_job(
                 sidecar_dir=str(output_dir),
                 sidecar_message=message,
             )
-            progress.log_background(message)
+            LOGGER.exception("XMP sidecar generation failed.")
+            progress.notify("error", "XMP sidecars failed", str(exc))
         else:
             raise
