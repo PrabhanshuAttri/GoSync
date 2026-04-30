@@ -68,6 +68,7 @@ def run_download_job(
             stop_requested=False,
             started_at=datetime.now().isoformat(timespec="seconds"),
             finished_at="",
+            notifications=[],
             total_ids=0,
             completed_ids=0,
             pending_ids=0,

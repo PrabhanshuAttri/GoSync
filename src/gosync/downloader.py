@@ -385,6 +385,11 @@ def process_pipeline(
                     )
                     progress.increment("completed_batches", 1)
                     progress.log("Batch extracted and logged.")
+                    progress.notify(
+                        "success",
+                        "Batch complete",
+                        f"{len(batch)} file(s) downloaded and logged.",
+                    )
                 else:
                     print("Batch extracted and logged.", flush=True)
 
@@ -392,10 +397,19 @@ def process_pipeline(
                 if isinstance(exc, DownloadCancelled):
                     temp_zip.unlink(missing_ok=True)
                     raise
-                message = f"Batch failed; queued for retry: {exc}"
+                batch_file_list = "\n".join(f"  - {media_id}" for media_id in batch)
+                message = (
+                    f"Batch failed; queued for retry: {exc}\n"
+                    f"Files in failed batch:\n{batch_file_list}"
+                )
                 if progress:
                     progress.increment("failed_batches", 1)
                     progress.log(message)
+                    progress.notify(
+                        "error",
+                        "Batch failed",
+                        f"{len(batch)} file(s) queued for retry. {exc}",
+                    )
                 else:
                     print(message, flush=True)
                 temp_zip.unlink(missing_ok=True)

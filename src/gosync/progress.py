@@ -31,6 +31,7 @@ class ProgressState:
     started_at: str = ""
     finished_at: str = ""
     events: list[str] = field(default_factory=list)
+    notifications: list[dict[str, str]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def update(self, **kwargs) -> None:
@@ -66,6 +67,20 @@ class ProgressState:
             self.events.append(f"[{timestamp}] {message}")
             self.events = self.events[-80:]
         print(message, flush=True)
+
+    def notify(self, level: str, title: str, message: str) -> None:
+        timestamp = datetime.now()
+        with self.lock:
+            self.notifications.append(
+                {
+                    "id": f"{timestamp.timestamp():.6f}-{len(self.notifications)}",
+                    "level": level,
+                    "title": title,
+                    "message": message,
+                    "created_at": timestamp.isoformat(timespec="seconds"),
+                }
+            )
+            self.notifications = self.notifications[-40:]
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -113,4 +128,5 @@ class ProgressState:
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
                 "events": list(self.events),
+                "notifications": list(self.notifications),
             }

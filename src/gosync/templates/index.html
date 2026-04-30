@@ -17,12 +17,12 @@
         </div>
       </div>
       <div class="topbar-actions">
+        <a class="topbar-link" href="https://github.com/PrabhanshuAttri/GoSync" target="_blank" rel="noopener noreferrer">GitHub</a>
         <button id="theme-toggle" class="theme-toggle" type="button" role="switch" aria-checked="true" aria-label="Dark mode">
           <span class="theme-label theme-label-light">Light</span>
           <span class="theme-track"><span class="theme-thumb"></span></span>
           <span class="theme-label theme-label-dark">Dark</span>
         </button>
-        <strong id="status" class="status-pill">Idle</strong>
       </div>
     </div>
   </header>
@@ -64,7 +64,7 @@
       <div class="split">
         <div class="metrics">
           <div class="metric">
-            <span>Media</span>
+            <span>Media Complete</span>
             <strong id="overall">0%</strong>
           </div>
           <div class="metric">
@@ -75,11 +75,59 @@
             <span>Batches</span>
             <strong id="batches">0 / 0</strong>
           </div>
-          <div class="metric">
-            <span>State</span>
-            <strong id="message" class="compact">Ready</strong>
-          </div>
         </div>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Progress</h2>
+            <span class="download-indicator" id="download-indicator" aria-label="Download idle">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3v12" />
+                <path d="m7 10 5 5 5-5" />
+                <path d="M5 21h14" />
+              </svg>
+              <span id="download-meta">Idle</span>
+            </span>
+          </div>
+          <div class="progress-stack">
+            <div class="transfer-stats">
+              <div class="transfer-stat">
+                <span class="transfer-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" role="img">
+                    <path d="M21 13a9 9 0 1 0-18 0" />
+                    <path d="M12 13l4-4" />
+                    <path d="M7 13h.01" />
+                    <path d="M17 13h.01" />
+                    <path d="M12 7h.01" />
+                  </svg>
+                </span>
+                <span class="transfer-label">Speed</span>
+                <strong id="speed-value">0 B/s</strong>
+              </div>
+              <div class="transfer-stat">
+                <span class="transfer-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" role="img">
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M12 7v5l3 2" />
+                  </svg>
+                </span>
+                <span class="transfer-label">Duration</span>
+                <strong id="duration-value">00:00</strong>
+              </div>
+              <div class="transfer-stat">
+                <span class="transfer-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" role="img">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <path d="M7 10l5 5 5-5" />
+                    <path d="M12 15V3" />
+                  </svg>
+                </span>
+                <span class="transfer-label">Downloaded</span>
+                <strong id="amount-value">0 B</strong>
+              </div>
+            </div>
+          </div>
+        </section>
 
         <section class="panel activity">
           <h2>Current Activity</h2>
@@ -87,39 +135,28 @@
           <p id="activity-detail">Waiting for a download job.</p>
         </section>
 
-        <section class="panel">
+        <section class="panel collapsible collapsed" id="event-log-panel">
           <div class="panel-header">
-            <h2>Progress</h2>
-            <span class="hint" id="download-meta">Waiting</span>
-          </div>
-          <div class="progress-stack">
-            <div class="progress-row">
-              <div class="label"><span>Media</span><span id="media-label">0 / 0</span></div>
-              <div class="bar"><div id="media-bar"></div></div>
-            </div>
-            <div class="progress-row">
-              <div class="label"><span>Batches</span><span id="batch-label">0 / 0</span></div>
-              <div class="bar"><div id="batch-bar"></div></div>
-            </div>
-            <div class="progress-row">
-              <div class="label"><span>Current Download</span><span id="download-label">0 B</span></div>
-              <div class="bar download-progress"><div id="download-bar"></div></div>
-            </div>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Event Log</h2>
+            <button
+              class="collapse-toggle"
+              id="event-log-toggle"
+              type="button"
+              aria-expanded="false"
+              aria-controls="event-log-body"
+            >
+              <span class="collapse-chevron" aria-hidden="true"></span>
+              <span>Event Log</span>
+            </button>
             <span class="hint">Latest events</span>
           </div>
-          <pre class="log" id="events">Ready</pre>
+          <div class="collapsible-body" id="event-log-body">
+            <pre class="log" id="events">Ready</pre>
+          </div>
         </section>
 
         <section class="panel sidecar-table-panel">
           <div class="panel-header">
             <h2>Media Files</h2>
-            <span class="hint" id="sidecar-table-summary">Waiting</span>
           </div>
           <div class="table-wrap">
             <table class="sidecar-table">
@@ -142,6 +179,8 @@
     </div>
   </main>
 
+  <div class="notifications" id="notifications" aria-live="polite" aria-atomic="false"></div>
+
   <script>
     const themeToggle = document.getElementById("theme-toggle");
     const applyTheme = (theme) => {
@@ -153,6 +192,17 @@
     applyTheme(localStorage.getItem("gosync-theme") || "dark");
     themeToggle.addEventListener("click", () => {
       applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
+    });
+
+    const eventLogPanel = document.getElementById("event-log-panel");
+    const eventLogToggle = document.getElementById("event-log-toggle");
+    const setEventLogCollapsed = (collapsed) => {
+      eventLogPanel.classList.toggle("collapsed", collapsed);
+      eventLogToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    };
+    setEventLogCollapsed(true);
+    eventLogToggle.addEventListener("click", () => {
+      setEventLogCollapsed(!eventLogPanel.classList.contains("collapsed"));
     });
 
     const setWidth = (id, value) => {
@@ -186,14 +236,33 @@
       const two = (value) => String(value).padStart(2, "0");
       return hrs ? `${hrs}:${two(mins)}:${two(secs)}` : `${two(mins)}:${two(secs)}`;
     };
+    const seenNotifications = new Set();
+    const showNotification = (notification) => {
+      if (!notification.id || seenNotifications.has(notification.id)) return;
+      seenNotifications.add(notification.id);
+
+      const container = document.getElementById("notifications");
+      const toast = document.createElement("div");
+      const title = document.createElement("strong");
+      const message = document.createElement("span");
+
+      toast.className = `notification ${notification.level || "info"}`;
+      title.textContent = notification.title || "GoSync";
+      message.textContent = notification.message || "";
+      toast.append(title, message);
+      container.append(toast);
+
+      window.setTimeout(() => toast.classList.add("visible"), 20);
+      window.setTimeout(() => {
+        toast.classList.remove("visible");
+        window.setTimeout(() => toast.remove(), 220);
+      }, notification.level === "error" ? 8000 : 5000);
+    };
     const refreshSidecarTable = async () => {
       const res = await fetch("/sidecars");
       const data = await res.json();
       const body = document.getElementById("sidecar-table-body");
-      const summary = document.getElementById("sidecar-table-summary");
       const items = data.items || [];
-      const downloadedCount = items.filter((item) => item.status === "downloaded").length;
-      summary.textContent = items.length ? `${downloadedCount} / ${items.length} downloaded` : "No media";
 
       if (!items.length) {
         body.innerHTML = '<tr><td colspan="3" class="empty-cell">No media found.</td></tr>';
@@ -220,16 +289,14 @@
         body.append(row);
       });
     };
+    let currentStatus = "idle";
     async function refresh() {
       const res = await fetch("/status");
       const data = await res.json();
+      currentStatus = data.status || "idle";
       document.getElementById("overall").textContent = `${data.overall_percent}%`;
       document.getElementById("downloaded-count").textContent = `${data.completed_ids} / ${data.total_ids}`;
       document.getElementById("batches").textContent = `${data.completed_batches} / ${data.total_batches}`;
-      const status = document.getElementById("status");
-      status.textContent = data.status;
-      status.className = `status-pill ${data.status}`;
-      document.getElementById("message").textContent = data.state_label || data.status || "Ready";
       const isRunning = data.status === "running";
       document.getElementById("stop-button").disabled = !isRunning || data.stop_requested;
       document.getElementById("start-button").disabled = isRunning;
@@ -243,32 +310,33 @@
       const sidecarDetail = data.sidecar_message ? `XMP: ${data.sidecar_message}` : "";
       document.getElementById("activity-detail").textContent =
         sidecarDetail ? `${downloadDetail}\n${sidecarDetail}` : downloadDetail;
-      document.getElementById("media-label").textContent = `${data.completed_ids} / ${data.total_ids}`;
-      document.getElementById("batch-label").textContent = `${data.completed_batches} / ${data.total_batches}`;
-      document.getElementById("download-label").textContent =
-        data.current_download_total
+      const isDownloading = data.current_download_bytes > 0 || data.current_download_started_at > 0;
+      const downloadIndicator = document.getElementById("download-indicator");
+      downloadIndicator.classList.toggle("active", isDownloading);
+      downloadIndicator.setAttribute("aria-label", isDownloading ? "Download in progress" : "Download idle");
+      document.getElementById("speed-value").textContent = isDownloading
+        ? `${formatBytes(data.current_download_speed_bps)}/s`
+        : "0 B/s";
+      document.getElementById("duration-value").textContent = isDownloading
+        ? formatElapsed(data.current_download_elapsed_seconds)
+        : "00:00";
+      document.getElementById("amount-value").textContent = isDownloading
+        ? data.current_download_total
           ? `${formatBytes(data.current_download_bytes)} / ${formatBytes(data.current_download_total)}`
-          : `${formatBytes(data.current_download_bytes)}`;
-      document.getElementById("download-meta").textContent =
-        data.current_download_bytes
-          ? `${formatBytes(data.current_download_speed_bps)}/s · ${formatElapsed(data.current_download_elapsed_seconds)}`
-          : "Waiting";
-      setWidth("media-bar", data.overall_percent);
-      setWidth("batch-bar", data.batch_percent);
-      if (data.current_download_bytes && !data.current_download_total) {
-        setIndeterminate("download-bar", true);
-      } else {
-        setWidth("download-bar", data.download_percent);
-      }
-      document.getElementById("events").textContent = data.events.length
+          : formatBytes(data.current_download_bytes)
+        : "0 B";
+      document.getElementById("download-meta").textContent = isDownloading ? "Downloading" : "Idle";
+      const events = document.getElementById("events");
+      events.textContent = data.events.length
         ? data.events.map((event) => event.replace(/\\n/g, "\n")).join("\n")
         : "Ready";
+      events.scrollTop = events.scrollHeight;
+      (data.notifications || []).forEach(showNotification);
       await refreshSidecarTable();
     }
     async function scheduleRefresh() {
       await refresh();
-      const status = document.getElementById("status").textContent;
-      const delay = status === "running" ? 1500 : 5000;
+      const delay = currentStatus === "running" ? 1500 : 5000;
       setTimeout(scheduleRefresh, delay);
     }
     scheduleRefresh();

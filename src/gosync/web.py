@@ -12,7 +12,7 @@ from gosync.config import resolve_inside_data_dir
 from gosync.downloader import extract_ids, get_completed_ids
 from gosync.progress import ProgressState
 from gosync.runtime import run_download_job
-from gosync.sidecar import run_sidecar_job
+from gosync.sidecar import read_media_from_har, run_sidecar_job, sidecar_stem
 
 
 PROGRESS = ProgressState()
@@ -20,12 +20,17 @@ JOB_THREAD: threading.Thread | None = None
 SIDECAR_THREAD: threading.Thread | None = None
 JOB_LOCK = threading.Lock()
 RESUME_CACHE: dict[str, object] = {}
+MEDIA_ID_CACHE: dict[str, object] = {}
 
 
 class StatusAccessLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        return '"GET /status ' not in message and '"GET /status?' not in message
+        quiet_poll_paths = ("/status", "/sidecars")
+        return not any(
+            f'"GET {path} ' in message or f'"GET {path}?' in message
+            for path in quiet_poll_paths
+        )
 
 
 def create_app(args: argparse.Namespace) -> Flask:
@@ -102,6 +107,35 @@ def create_app(args: argparse.Namespace) -> Flask:
     def media_sidecar_rows() -> list[dict[str, str]]:
         output_dir = resolve_inside_data_dir(data_dir, args.output_folder).resolve()
         sidecar_dir = resolve_inside_data_dir(data_dir, args.sidecar_folder).resolve()
+        completed_log = resolve_inside_data_dir(
+            data_dir,
+            args.completed_log,
+        ).resolve()
+        completed_ids = get_completed_ids(completed_log)
+        current_har = selected_har_file()
+        media_id_by_filename: dict[str, str] = {}
+
+        if current_har:
+            try:
+                har_path = data_dir / current_har
+                cache_key = (str(har_path), har_path.stat().st_mtime)
+
+                if MEDIA_ID_CACHE.get("key") == cache_key:
+                    media_id_by_filename = dict(MEDIA_ID_CACHE["media_id_by_filename"])
+                else:
+                    media_items, _matching_entries = read_media_from_har(har_path)
+                    media_id_by_filename = {
+                        sidecar_stem(item): str(item["id"])
+                        for item in media_items
+                        if item.get("id")
+                    }
+                    MEDIA_ID_CACHE.update(
+                        key=cache_key,
+                        media_id_by_filename=media_id_by_filename,
+                    )
+            except Exception:
+                media_id_by_filename = {}
+
         downloaded_files = {
             path.name: path
             for path in output_dir.iterdir()
@@ -120,7 +154,12 @@ def create_app(args: argparse.Namespace) -> Flask:
             key=lambda name: (name in downloaded_files, name.lower()),
         ):
             sidecar_path = sidecar_files.get(filename)
-            downloaded = filename in downloaded_files
+            media_id = media_id_by_filename.get(filename)
+            downloaded = (
+                media_id in completed_ids
+                if media_id
+                else filename in downloaded_files
+            )
             rows.append(
                 {
                     "filename": filename,
