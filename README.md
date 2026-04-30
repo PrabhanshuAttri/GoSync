@@ -20,6 +20,10 @@ Current app version:
 1.0.1
 ```
 
+## Screenshot
+
+![GoSync web dashboard](docs/assets/gosync-dashboard.png)
+
 ## Requirements
 
 - Docker or Docker Compose
@@ -150,6 +154,8 @@ Print the app version:
 ```bash
 PYTHONPATH=src python -m gosync --version
 ```
+
+Release and publishing steps are documented in [docs/release.md](docs/release.md).
 
 Run the downloader once without the web UI:
 
