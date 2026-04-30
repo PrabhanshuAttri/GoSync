@@ -8,6 +8,8 @@ GoSync works around that workflow by reading media IDs and session headers from 
 
 This project was inspired by [josefkeup741/gopro-cloud-rescue](https://github.com/josefkeup741/gopro-cloud-rescue).
 
+GoSync is a vibe-coded, AI-assisted utility built around a real recovery need.
+
 Published image:
 
 ```text
