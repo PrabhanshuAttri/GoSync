@@ -13,13 +13,13 @@ GoSync is a vibe-coded, AI-assisted utility built around a real GoPro Cloud down
 Published image:
 
 ```text
-ghcr.io/prabhanshuattri/gosync:1.0.3
+ghcr.io/prabhanshuattri/gosync:1.1.0
 ```
 
 Current app version:
 
 ```text
-1.0.3
+1.1.0
 ```
 
 ## Screenshot
@@ -80,7 +80,7 @@ Run with plain Docker:
 docker run --rm \
   -p 8080:8080 \
   -v "$PWD/data:/data" \
-  ghcr.io/prabhanshuattri/gosync:1.0.3
+  ghcr.io/prabhanshuattri/gosync:1.1.0
 ```
 
 Then open `http://localhost:8080`.
@@ -211,5 +211,5 @@ docker run --rm \
   -e DOWNLOAD_FOLDER=media \
   -e BATCH_MAX_BYTES=2147483648 \
   -v "$PWD/data:/data" \
-  ghcr.io/prabhanshuattri/gosync:1.0.3
+  ghcr.io/prabhanshuattri/gosync:1.1.0
 ```
