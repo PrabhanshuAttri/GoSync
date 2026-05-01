@@ -2,13 +2,13 @@
 
 GoSync is a self-hosted Docker utility for downloading a GoPro cloud media library when the official bulk download flow is too limited for large collections.
 
-GoPro Cloud limits bulk downloads to 25 items at a time. That becomes painful if you have hundreds or thousands of photos and videos, because you have to manually select, download, track, and retry many small batches. Large browser downloads can also fail partway through, leaving you unsure what finished and what still needs to be recovered.
+GoPro Cloud limits bulk downloads to 25 items at a time. That becomes painful if you have hundreds or thousands of photos and videos, because you have to manually select, download, track, and retry many small batches. Large browser downloads can also fail partway through, leaving you unsure what finished and what still needs to be downloaded.
 
-GoSync works around that workflow by reading media IDs and session headers from a browser HAR export, calling the GoPro download API directly, downloading in safe batches, extracting each batch into a mounted data directory, and recording completed IDs so interrupted runs can resume. The container includes a basic web UI for uploading the HAR file, starting the download, and watching live progress.
+GoSync works around that workflow by reading media metadata and session headers from a browser HAR export, calling the GoPro download API directly, downloading in safe batches, extracting each batch into a mounted data directory, and maintaining JSON state so interrupted runs can resume. The container includes a basic web UI for uploading the HAR file, starting the download, and watching live progress.
 
 This project was inspired by [josefkeup741/gopro-cloud-rescue](https://github.com/josefkeup741/gopro-cloud-rescue).
 
-GoSync is a vibe-coded, AI-assisted utility built around a real recovery need.
+GoSync is a vibe-coded, AI-assisted utility built around a real GoPro Cloud download need.
 
 Published image:
 
@@ -30,7 +30,7 @@ Current app version:
 
 - Docker or Docker Compose
 - A HAR file exported from your logged-in GoPro media library
-- Enough free disk space in the mounted data directory for the recovered media
+- Enough free disk space in the mounted data directory for the downloaded media
 
 ## Export The HAR File
 
@@ -87,20 +87,21 @@ Then open `http://localhost:8080`.
 
 ## Using The Web UI
 
-The web UI is the default container experience. It is a small local dashboard for managing one recovery job at a time.
+The web UI is the default container experience. It is a small local dashboard for managing one download job at a time.
 
 1. Open `http://localhost:49152` when using Docker Compose, or the host port you mapped with Docker.
 2. In **HAR File**, upload the HAR export from your logged-in GoPro session.
 3. In **Download Job**, select the uploaded HAR file and click **Start Download**.
-4. Click **Stop Download** if you need to cancel the active job. GoSync stops safely, removes the temporary zip, and keeps completed IDs for resume.
+4. Click **Stop Download** if you need to cancel the active job. GoSync stops safely, removes the temporary zip, and keeps JSON state for resume.
 5. Watch **Media**, **Batches**, and **Current Download** progress update live.
 6. Use **Current Activity** for the latest detailed action, such as the batch currently being processed.
-7. Use **Event Log** for a running history of uploads, retries, stops, failures, and completed batches.
-8. Use the **Light** or **Dark** toggle in the header to switch themes. The browser remembers your choice.
+7. Use **Media Files** to see every parsed media item. The table can filter by extension and sorts current downloads first, then downloaded files, then pending files.
+8. Use **Event Log** for a running history of uploads, extension summaries, retries, stops, failures, completed batches, and final run summaries.
+9. Use the **Light** or **Dark** toggle in the header to switch themes. The browser remembers your choice.
 
-The dashboard stores uploaded HAR files in the mounted data directory. Downloaded media, the completion ledger, and temporary batch zip file also live in that same directory.
+The dashboard stores uploaded HAR files in the mounted data directory. Downloaded media, generated sidecars, media metadata dumps, JSON state, run reports, and the temporary batch zip file also live in that same directory.
 
-If the container stops or your network drops, start GoSync again with the same data directory. The web UI will use `completed_ids.txt` to skip media that was already extracted.
+If the container stops or your network drops, start GoSync again with the same data directory. The web UI will sync `gosync_state.json` against the actual files in `downloads/` and resume anything still pending.
 
 ## Data Directory Structure
 
@@ -109,29 +110,38 @@ The mounted data directory is the only persistent storage GoSync needs. By defau
 ```text
 data/
 ├── gopro.com.har
-├── completed_ids.txt
-├── sidecars/
-│   ├── GX010001.MP4.xmp
-│   ├── GX010002.MP4.xmp
-│   └── ...
+├── manifest.json
+├── media_search.json
+├── gosync_state.json
+├── reports/
+│   └── gosync-report-20260501-120000.json
 └── downloads/
-    ├── GX010001.MP4
-    ├── GX010002.MP4
-    └── ...
+    ├── jpg/
+    │   ├── GX010002.JPG
+    │   └── GX010002.JPG.xmp
+    └── mp4/
+        ├── GX010001.MP4
+        └── GX010001.MP4.xmp
 ```
 
 Files and folders:
 
 - `gopro.com.har`: exported browser HAR file, or another filename set with `HAR_FILE`.
-- `downloads/`: recovered media output folder, configurable with `DOWNLOAD_FOLDER`.
-- `sidecars/`: XMP sidecar output folder generated from HAR media metadata, configurable with `SIDECAR_FOLDER`.
-- `completed_ids.txt`: resume ledger, configurable with `COMPLETED_LOG`.
+- `downloads/`: downloaded media output folder, configurable with `DOWNLOAD_FOLDER`.
+  Media files and their XMP sidecars are grouped together in extension folders
+  such as `downloads/mp4/` and `downloads/jpg/`.
+- `manifest.json`: media manifest parsed from HAR `media/search` responses.
+- `media_search.json`: dump of all media objects extracted from HAR
+  `media/search` responses, including duplicates before manifest deduplication.
+- `gosync_state.json`: JSON resume state for every parsed media item, configurable with `GOSYNC_STATE_FILE`.
+- `reports/`: run reports written when downloads complete or stop.
+- `completed_ids.txt`: legacy resume ledger imported once for backward compatibility.
 - `gopro_temp_batch.zip`: temporary zip file used during a batch download; deleted after extraction or failure.
 
 See [XMP sidecar processing](docs/sidecars.md) for sidecar field selection
 and sensitive field exclusions.
 
-If a run is interrupted, start the container again with the same data directory. GoSync skips IDs already listed in `completed_ids.txt`.
+If a run is interrupted, start the container again with the same data directory. GoSync syncs `gosync_state.json` to the files in `downloads/`, marks missing files pending again, and skips files that are already present.
 
 ## Local Build
 
@@ -178,13 +188,15 @@ PYTHONPATH=src python -m gosync --data-dir ./data --run-once
 | --- | --- | --- |
 | `GOSYNC_VOLUME_PATH` | `./data` | Host path mounted to `/data` by `docker-compose.yml`. |
 | `GOSYNC_WEB_PORT` | `49152` | Host port mapped to the container web UI by `docker-compose.yml`. |
-| `DATA_DIR` | `/data` | Container path containing the HAR file, downloads, and resume ledger. |
+| `DATA_DIR` | `/data` | Container path containing the HAR file, downloads, sidecars, metadata dumps, state, and reports. |
 | `HAR_FILE` | `gopro.com.har` | HAR filename or path. Relative paths are resolved inside `DATA_DIR`. |
 | `DOWNLOAD_FOLDER` | `downloads` | Download output folder. Relative paths are resolved inside `DATA_DIR`. |
-| `SIDECAR_FOLDER` | `sidecars` | XMP sidecar output folder. Relative paths are resolved inside `DATA_DIR`. |
-| `COMPLETED_LOG` | `completed_ids.txt` | Resume ledger file. Relative paths are resolved inside `DATA_DIR`. |
-| `BATCH_SIZE` | `5` | Number of media IDs requested per zip batch. |
-| `MAX_RETRY_PASSES` | `3` | Number of retry passes for failed batches. Use `0` to retry forever. |
+| `SIDECAR_FOLDER` | `sidecars` | Deprecated. XMP sidecars are written next to media files inside `DOWNLOAD_FOLDER`. |
+| `GOSYNC_STATE_FILE` | `gosync_state.json` | JSON state file for all parsed media items. Relative paths are resolved inside `DATA_DIR`. |
+| `COMPLETED_LOG` | `completed_ids.txt` | Legacy resume ledger imported once for backward compatibility. |
+| `BATCH_MAX_BYTES` | `auto` | Maximum total source bytes per zip batch. `auto` uses the largest `file_size` found in the HAR manifest. |
+| `BATCH_SIZE` | `5` | Deprecated; retained for compatibility but not used by size-based batching. |
+| `MAX_RETRY_PASSES` | `3` | Deprecated; multi-file failures split into one-file retries, and single-file batches retry up to 3 times. |
 | `REQUEST_TIMEOUT_SECONDS` | `60` | HTTP request timeout for GoPro API calls. |
 | `ENV` | `production` | Runtime environment. Set to `dev` or `development` to enable Flask debug mode. |
 | `WEB_HOST` | `0.0.0.0` | Container bind host for the web server. |
@@ -197,8 +209,7 @@ Example:
 docker run --rm \
   -p 8080:8080 \
   -e DOWNLOAD_FOLDER=media \
-  -e BATCH_SIZE=3 \
-  -e MAX_RETRY_PASSES=0 \
+  -e BATCH_MAX_BYTES=2147483648 \
   -v "$PWD/data:/data" \
   ghcr.io/prabhanshuattri/gosync:1.0.3
 ```

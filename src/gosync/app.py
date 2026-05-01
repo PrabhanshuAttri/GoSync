@@ -18,7 +18,12 @@ def main() -> int:
     print("========================================", flush=True)
     print(f"Open http://localhost:{WEB_PORT}", flush=True)
     print(f"Debug mode: {'enabled' if DEBUG else 'disabled'}", flush=True)
-    LOGGER.info("Starting Flask server. host=%s port=%s debug=%s", WEB_HOST, WEB_PORT, DEBUG)
+    LOGGER.info(
+        "Starting Flask server. host=%s port=%s debug=%s",
+        WEB_HOST,
+        WEB_PORT,
+        DEBUG,
+    )
     app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, debug=DEBUG)
     return 0
 

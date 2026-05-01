@@ -28,7 +28,7 @@
         <div class="brand-mark">GS</div>
         <div>
           <h1>GoSync</h1>
-          <p>GoPro cloud library recovery · v{{ app_version }}</p>
+          <p>GoPro Cloud library download · v{{ app_version }}</p>
         </div>
       </div>
       <div class="topbar-actions">
@@ -196,6 +196,9 @@
         <section class="panel sidecar-table-panel">
           <div class="panel-header">
             <h2>Media Files</h2>
+            <select id="extension-filter" class="table-filter" aria-label="Filter media files by extension">
+              <option value="">All extensions</option>
+            </select>
           </div>
           <div class="table-wrap">
             <table class="sidecar-table">
@@ -351,19 +354,64 @@
         window.setTimeout(() => toast.remove(), 220);
       }, notification.level === "error" ? 8000 : 5000);
     };
-    const refreshSidecarTable = async () => {
-      const res = await fetch("/sidecars");
-      const data = await res.json();
-      const body = document.getElementById("sidecar-table-body");
-      const items = data.items || [];
+    let sidecarItems = [];
+    const extensionFilter = document.getElementById("extension-filter");
+    const mediaExtension = (filename) => {
+      const base = String(filename || "").split(/[\\/]/).pop();
+      const index = base.lastIndexOf(".");
+      return index > -1 && index < base.length - 1
+        ? base.slice(index + 1).toLowerCase()
+        : "";
+    };
+    const syncExtensionFilterOptions = (items) => {
+      const selected = extensionFilter.value;
+      const extensions = Array.from(
+        new Set(items.map((item) => mediaExtension(item.filename)).filter(Boolean))
+      ).sort((a, b) => a.localeCompare(b));
 
-      if (!items.length) {
+      extensionFilter.replaceChildren();
+      const allOption = document.createElement("option");
+      allOption.value = "";
+      allOption.textContent = "All extensions";
+      extensionFilter.append(allOption);
+
+      extensions.forEach((extension) => {
+        const option = document.createElement("option");
+        option.value = extension;
+        option.textContent = extension.toUpperCase();
+        extensionFilter.append(option);
+      });
+
+      extensionFilter.value = extensions.includes(selected) ? selected : "";
+      extensionFilter.disabled = extensions.length < 2;
+    };
+    const renderSidecarTable = () => {
+      const body = document.getElementById("sidecar-table-body");
+      const selectedExtension = extensionFilter.value;
+      const items = selectedExtension
+        ? sidecarItems.filter((item) => mediaExtension(item.filename) === selectedExtension)
+        : sidecarItems;
+      const sortedItems = [...items].sort((a, b) => {
+        const statusRank = (item) => {
+          if (item.status === "downloading") return 0;
+          if (item.status === "downloaded") return 1;
+          return 2;
+        };
+        return statusRank(a) - statusRank(b)
+          || String(a.filename || "").localeCompare(String(b.filename || ""));
+      });
+
+      if (!sidecarItems.length) {
         body.innerHTML = '<tr><td colspan="3" class="empty-cell">No media found.</td></tr>';
+        return;
+      }
+      if (!items.length) {
+        body.innerHTML = '<tr><td colspan="3" class="empty-cell">No media matches this filter.</td></tr>';
         return;
       }
 
       body.replaceChildren();
-      items.forEach((item) => {
+      sortedItems.forEach((item) => {
         const row = document.createElement("tr");
         const filename = document.createElement("td");
         const sidecar = document.createElement("td");
@@ -381,6 +429,14 @@
         row.append(filename, sidecar, statusCell);
         body.append(row);
       });
+    };
+    extensionFilter.addEventListener("change", renderSidecarTable);
+    const refreshSidecarTable = async () => {
+      const res = await fetch("/sidecars");
+      const data = await res.json();
+      sidecarItems = data.items || [];
+      syncExtensionFilterOptions(sidecarItems);
+      renderSidecarTable();
     };
     let currentStatus = "idle";
     async function refresh() {

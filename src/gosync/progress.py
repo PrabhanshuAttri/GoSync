@@ -21,6 +21,7 @@ class ProgressState:
     failed_batches: int = 0
     current_batch: int = 0
     current_batch_size: int = 0
+    current_batch_keys: list[str] = field(default_factory=list)
     current_download_bytes: int = 0
     current_download_total: int = 0
     current_download_started_at: float = 0
@@ -32,6 +33,8 @@ class ProgressState:
     sidecar_count: int = 0
     sidecar_message: str = ""
     har_file: str = ""
+    report_path: str = ""
+    job_id: str = ""
     started_at: str = ""
     finished_at: str = ""
     events: list[str] = field(default_factory=list)
@@ -117,6 +120,7 @@ class ProgressState:
                 else 0,
                 "current_batch": self.current_batch,
                 "current_batch_size": self.current_batch_size,
+                "current_batch_keys": list(self.current_batch_keys),
                 "current_download_bytes": current_bytes,
                 "current_download_total": current_total,
                 "current_download_speed_bps": round(self.current_download_speed_bps, 2),
@@ -132,6 +136,8 @@ class ProgressState:
                 "sidecar_count": self.sidecar_count,
                 "sidecar_message": self.sidecar_message,
                 "har_file": self.har_file,
+                "report_path": self.report_path,
+                "job_id": self.job_id,
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
                 "events": list(self.events),

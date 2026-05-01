@@ -1,82 +1,32 @@
-import base64
 import json
 import logging
 import re
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
+from gosync.constants import (
+    COMMON_SIDECAR_FIELDS,
+    IMAGE_SIDECAR_FIELDS,
+    MEDIA_LIST_KEYS,
+    MEDIA_SEARCH_URL,
+    STATUS_COMPLETE,
+    STATUS_FAILED,
+    STATUS_RUNNING,
+    VIDEO_SIDECAR_FIELDS,
+)
+from gosync.manifest import (
+    MediaItem,
+    parse_response_text,
+    read_manifest_from_har,
+)
+from gosync.paths import sidecar_output_path
 from gosync.progress import ProgressState
+from gosync.state import mark_sidecars
 
 
 LOGGER = logging.getLogger("gosync.sidecar")
-
-MEDIA_SEARCH_URL = "https://api.gopro.com/media/search"
-MEDIA_LIST_KEYS = ("media", "items", "data")
-STANDARD_FIELDS = {
-    "camera_model",
-    "captured_at",
-    "captured_at_timezone",
-    "content_title",
-    "content_type",
-    "created_at",
-    "file_extension",
-    "file_size",
-    "filename",
-    "firmware_version",
-    "fov",
-    "gopro_user_id",
-    "height",
-    "id",
-    "mce_type",
-    "orientation",
-    "play_as",
-    "resolution",
-    "source_duration",
-    "source_gumi",
-    "source_mgumi",
-    "stabilized",
-    "submitted_at",
-    "token",
-    "type",
-    "updated_at",
-    "width",
-}
-COMMON_SIDECAR_FIELDS = {
-    "ai_training_opt_out",
-    "camera_model",
-    "captured_at",
-    "captured_at_timezone",
-    "content_title",
-    "content_type",
-    "created_at",
-    "file_extension",
-    "file_size",
-    "filename",
-    "firmware_version",
-    "fov",
-    "height",
-    "orientation",
-    "play_as",
-    "ready_to_view",
-    "resolution",
-    "submitted_at",
-    "thumbnail_available",
-    "type",
-    "updated_at",
-    "width",
-}
-VIDEO_SIDECAR_FIELDS = COMMON_SIDECAR_FIELDS | {
-    "available_labels",
-    "mce_type",
-    "moments_count",
-    "ready_to_edit",
-    "source_duration",
-    "stabilized",
-}
-IMAGE_SIDECAR_FIELDS = COMMON_SIDECAR_FIELDS
 
 
 def xml_value(value: Any) -> str:
@@ -124,7 +74,9 @@ def is_media_file(item: Any) -> bool:
         return False
 
     filename = item.get("filename")
-    extension = item.get("file_extension") or Path(str(filename or "")).suffix.lstrip(".")
+    extension = item.get("file_extension") or Path(
+        str(filename or "")
+    ).suffix.lstrip(".")
     if not filename or not extension:
         return False
 
@@ -139,31 +91,6 @@ def is_media_file(item: Any) -> bool:
         "summary",
     }
     return item_type not in non_media_types and content_type not in non_media_types
-
-
-def parse_response_text(text: str, entry_number: int) -> Any | None:
-    if not text:
-        return None
-
-    candidates = [text.strip()]
-    if text.lstrip().startswith(")]}',"):
-        candidates.append(text.split("\n", 1)[-1].strip())
-
-    for candidate in candidates:
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            pass
-
-    try:
-        decoded = base64.b64decode(text).decode("utf-8", errors="ignore").strip()
-        return json.loads(decoded)
-    except Exception:
-        print(
-            f"Warning: skipped unparsable media/search response #{entry_number}",
-            file=sys.stderr,
-        )
-        return None
 
 
 def iter_candidate_lists(response_json: Any) -> list[list[Any]]:
@@ -369,54 +296,84 @@ def write_sidecars(media_items: list[dict[str, Any]], output_dir: Path) -> int:
     written = 0
 
     for metadata in media_items:
-        sidecar_path = output_dir / f"{sidecar_stem(metadata)}.xmp"
+        filename = sidecar_stem(metadata)
+        sidecar_path = sidecar_output_path(output_dir, filename, f"{filename}.xmp")
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
         sidecar_path.write_text(build_xmp(metadata), encoding="utf-8")
         written += 1
 
     return written
 
 
-def generate_sidecars_from_har(har_path: Path, output_dir: Path) -> tuple[int, int]:
-    media_items, matching_entries = read_media_from_har(har_path)
-    if matching_entries == 0:
-        raise ValueError(f"No API calls to {MEDIA_SEARCH_URL} found in HAR file")
-    if not media_items:
-        raise ValueError("No media file metadata found in media/search responses")
+def write_sidecars_for_manifest(
+    media_items: list[MediaItem],
+    output_dir: Path,
+    state_file: Path | None = None,
+) -> int:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written_keys: list[str] = []
 
-    written = write_sidecars(media_items, output_dir)
-    return written, matching_entries
+    for media_item in media_items:
+        sidecar_path = sidecar_output_path(
+            output_dir,
+            media_item.filename,
+            media_item.sidecar_filename,
+        )
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        sidecar_path.write_text(build_xmp(media_item.metadata), encoding="utf-8")
+        written_keys.append(media_item.key)
+
+    if state_file:
+        mark_sidecars(state_file, written_keys, STATUS_COMPLETE)
+
+    return len(written_keys)
+
+
+def generate_sidecars_from_har(har_path: Path, output_dir: Path) -> tuple[int, int]:
+    manifest = read_manifest_from_har(har_path)
+    written = write_sidecars_for_manifest(manifest.media, output_dir)
+    return written, manifest.matching_entries
 
 
 def run_sidecar_job(
     har_path: Path,
     output_dir: Path,
     progress: ProgressState | None = None,
+    media_items: list[MediaItem] | None = None,
+    state_file: Path | None = None,
 ) -> None:
     try:
         if progress:
             message = f"Generating XMP sidecars in {output_dir}..."
             progress.update(
-                sidecar_status="running",
+                sidecar_status=STATUS_RUNNING,
                 sidecar_dir=str(output_dir),
                 sidecar_message=message,
             )
             LOGGER.info(message)
             progress.notify("info", "XMP sidecars", "Generating XMP sidecar files.")
 
-        written, matching_entries = generate_sidecars_from_har(
-            har_path,
-            output_dir,
-        )
+        if media_items is None:
+            manifest = read_manifest_from_har(har_path)
+            media_items = manifest.media
+            matching_entries = manifest.matching_entries
+        else:
+            matching_entries = 0
+
+        written = write_sidecars_for_manifest(media_items, output_dir, state_file)
 
         if progress:
             file_label = "file" if written == 1 else "files"
             response_label = "response" if matching_entries == 1 else "responses"
-            message = (
-                f"Generated {written} XMP sidecar {file_label} from "
-                f"{matching_entries} media/search {response_label}."
-            )
+            if matching_entries:
+                message = (
+                    f"Generated {written} XMP sidecar {file_label} from "
+                    f"{matching_entries} media/search {response_label}."
+                )
+            else:
+                message = f"Generated {written} XMP sidecar {file_label}."
             progress.update(
-                sidecar_status="complete",
+                sidecar_status=STATUS_COMPLETE,
                 sidecar_count=written,
                 sidecar_dir=str(output_dir),
                 sidecar_message=message,
@@ -428,10 +385,17 @@ def run_sidecar_job(
                 f"Generated {written} XMP sidecar {file_label}.",
             )
     except Exception as exc:
+        if state_file and media_items:
+            mark_sidecars(
+                state_file,
+                [item.key for item in media_items],
+                STATUS_FAILED,
+                str(exc),
+            )
         if progress:
             message = f"XMP sidecar generation failed: {exc}"
             progress.update(
-                sidecar_status="failed",
+                sidecar_status=STATUS_FAILED,
                 sidecar_dir=str(output_dir),
                 sidecar_message=message,
             )
