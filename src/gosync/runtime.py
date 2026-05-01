@@ -270,7 +270,7 @@ def run_download_job(
             current_download_total=0,
             report_path=str(report_path),
         )
-        progress.log(
+        progress.log_background(
             build_run_summary(
                 final_state,
                 manifest,
@@ -309,7 +309,7 @@ def run_download_job(
             report_path=report_path,
         )
         if final_state and manifest:
-            progress.log(
+            progress.log_background(
                 build_run_summary(
                     final_state,
                     manifest,
@@ -319,8 +319,7 @@ def run_download_job(
                 )
             )
         else:
-            suffix = f" Run report: {report_path}" if report_path else ""
-            progress.log(f"Download stopped by user.{suffix}")
+            progress.log_event("Download stopped by user.", "Stopped")
     except Exception as exc:
         progress.update(
             status="failed",
