@@ -33,6 +33,28 @@ def test_size_batches_use_largest_file_as_auto_cap(make_media_item) -> None:
     ]
 
 
+def test_size_batches_clamp_oversized_cap_to_largest_file(make_media_item) -> None:
+    items = [
+        make_media_item("A", "largest.mp4", 80),
+        make_media_item("B", "large.mp4", 50),
+        make_media_item("C", "medium.mp4", 40),
+        make_media_item("D", "small.jpg", 30),
+    ]
+
+    batch_cap = parse_batch_max_bytes(200, items)
+    batches = build_size_batches(items, 200)
+
+    assert batch_cap == 80
+    assert [[item.filename for item in batch] for batch in batches] == [
+        ["largest.mp4"],
+        ["large.mp4", "small.jpg"],
+        ["medium.mp4"],
+    ]
+    assert all(
+        sum(item.file_size or 0 for item in batch) <= 80 for batch in batches
+    )
+
+
 def test_size_batches_put_unknown_size_items_in_single_item_batches(
     make_media_item,
 ) -> None:
@@ -109,4 +131,3 @@ def test_safe_extract_rejects_zip_slip_paths(tmp_path: Path) -> None:
 
     with zipfile.ZipFile(archive_path) as zip_ref, pytest.raises(ValueError):
         safe_extract(zip_ref, tmp_path / "downloads")
-

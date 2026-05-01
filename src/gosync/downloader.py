@@ -211,14 +211,17 @@ def build_batches(ids: list[str], batch_size: int) -> list[list[str]]:
 
 def parse_batch_max_bytes(value: str | int | None, media_items: list[MediaItem]) -> int:
     valid_sizes = [item.file_size for item in media_items if item.file_size]
+    largest_file_size = max(valid_sizes) if valid_sizes else 0
     if value in (None, "", "auto"):
-        return max(valid_sizes) if valid_sizes else 0
+        return largest_file_size
     try:
         parsed = int(value)
     except (TypeError, ValueError):
         raise ValueError("--batch-max-bytes must be an integer or 'auto'") from None
     if parsed < 1:
         raise ValueError("--batch-max-bytes must be greater than zero")
+    if largest_file_size:
+        return min(parsed, largest_file_size)
     return parsed
 
 
@@ -232,6 +235,9 @@ def build_size_batches(
         key=lambda item: (item.file_size or 0, item.filename),
         reverse=True,
     )
+    largest_file_size = known_size[0].file_size if known_size else 0
+    if largest_file_size:
+        batch_max_bytes = min(batch_max_bytes, largest_file_size)
 
     batches: list[list[MediaItem]] = []
     batch_sizes: list[int] = []
