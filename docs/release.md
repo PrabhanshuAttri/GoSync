@@ -1,25 +1,45 @@
 # Release Process
 
-GoSync uses the package version in `src/gosync/__init__.py` as the source of
-truth for releases.
+GoSync uses two Docker publishing paths:
 
-The Docker publishing workflow reads that version, passes it into the Docker
-build as `GOSYNC_VERSION`, and publishes these GHCR image tags:
+- Pull requests build the Docker image for validation only. They do not publish
+  a GHCR image.
+- Pushes to `main`, including merged pull requests, publish rolling image tags:
+  `latest`, `main`, and `sha-<commit>`.
+- Version tags like `v1.2.0` publish immutable release tags: `1.2.0` and
+  `1.2`.
 
-- `ghcr.io/prabhanshuattri/gosync:<version>`
-- `ghcr.io/prabhanshuattri/gosync:latest`
-- branch, git tag, and sha tags from `docker/metadata-action`
+Do not bump the app version in every pull request. Bump the version only when
+preparing an intentional release.
+
+## Normal Pull Requests
+
+For feature, fix, dependency, and documentation pull requests:
+
+1. Do not update `src/gosync/__init__.py`.
+2. Do not update release defaults just to merge the PR.
+3. Let CI run tests and build the Docker image without publishing it.
+
+After the PR merges, the push to `main` publishes:
+
+```text
+ghcr.io/prabhanshuattri/gosync:latest
+ghcr.io/prabhanshuattri/gosync:main
+ghcr.io/prabhanshuattri/gosync:sha-<commit>
+```
 
 ## Prepare A Release
 
-Update every release default to the new version:
+When you want a stable release, update every release-facing version reference:
 
 - `src/gosync/__init__.py`
-- `Dockerfile`
-- `docker-compose.yml`
 - `README.md`
+- any release notes or docs that mention the current version
 
-Then verify the version and compose file:
+The Docker workflow reads the package version from `src/gosync/__init__.py` and
+passes it into the image build as `GOSYNC_VERSION`.
+
+Verify the version and compose file:
 
 ```bash
 PYTHONPATH=src python -m gosync --version
@@ -32,17 +52,20 @@ Commit the release changes:
 
 ```bash
 git status
-git add Dockerfile README.md docker-compose.yml src/gosync/__init__.py src/gosync/app.py src/gosync/config.py src/gosync/templates/index.html src/gosync/web.py .github/workflows/docker-publish.yml docs/release.md
+git add README.md src/gosync/__init__.py docs/release.md
 git commit -m "Release GoSync <version>"
 git push origin main
 ```
 
+The push to `main` publishes the rolling tags. It does not publish the immutable
+release tag until you create the matching git tag.
+
 ## Publish The Version Tag
 
-Create and push a matching git tag:
+Create and push a matching signed git tag:
 
 ```bash
-git tag v<version>
+git tag -s v<version> -m "Release GoSync <version>"
 git push origin v<version>
 ```
 

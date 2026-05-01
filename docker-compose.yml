@@ -9,7 +9,7 @@ x-portals:
 
 services:
   gosync:
-    image: ghcr.io/prabhanshuattri/gosync:${GOSYNC_IMAGE_TAG:-1.1.0}
+    image: ghcr.io/prabhanshuattri/gosync:${GOSYNC_IMAGE_TAG:-latest}
     container_name: gosync
     labels:
       org.opencontainers.image.title: GoSync
@@ -17,7 +17,7 @@ services:
       org.opencontainers.image.source: https://github.com/prabhanshuattri/GoSync
       org.opencontainers.image.url: https://github.com/prabhanshuattri/GoSync
       org.opencontainers.image.vendor: prabhanshuattri
-      org.opencontainers.image.version: ${GOSYNC_VERSION:-1.1.0}
+      org.opencontainers.image.version: ${GOSYNC_VERSION:-latest}
     environment:
       ENV: ${ENV:-production}
       DATA_DIR: /data
