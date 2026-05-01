@@ -60,7 +60,10 @@ def pluralize(count: int, singular: str, plural: str | None = None) -> str:
 def format_size_mib(size_bytes: int | None) -> str:
     if not size_bytes:
         return "unknown size"
-    return f"{size_bytes / (1024 * 1024):.2f} MiB"
+    size_mib = size_bytes / (1024 * 1024)
+    if size_mib > 1024:
+        return f"{size_mib / 1024:.2f} GiB"
+    return f"{size_mib:.2f} MiB"
 
 
 def format_media_for_log(item: MediaItem) -> str:
