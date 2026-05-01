@@ -3,18 +3,27 @@ import os
 from pathlib import Path
 
 from gosync import __version__
+from gosync.constants import (
+    DEFAULT_DATA_DIR as FALLBACK_DATA_DIR,
+    DEFAULT_DOWNLOAD_FOLDER,
+    DEFAULT_LEGACY_COMPLETED_LOG,
+    DEFAULT_SIDECAR_FOLDER as FALLBACK_SIDECAR_FOLDER,
+    DEFAULT_STATE_FILE,
+)
 
 
 ENV = os.getenv("ENV", "production").lower()
 IS_PROD = ENV in {"prod", "production"}
 DEBUG = ENV in {"dev", "development"}
-DEFAULT_DATA_DIR = os.getenv("DATA_DIR", "/data")
+DEFAULT_DATA_DIR = os.getenv("DATA_DIR", FALLBACK_DATA_DIR)
 DEFAULT_OUTPUT_FOLDER = os.getenv(
     "DOWNLOAD_FOLDER",
-    os.getenv("OUTPUT_FOLDER", "downloads"),
+    os.getenv("OUTPUT_FOLDER", DEFAULT_DOWNLOAD_FOLDER),
 )
-DEFAULT_SIDECAR_FOLDER = os.getenv("SIDECAR_FOLDER", "sidecars")
-DEFAULT_COMPLETED_LOG = os.getenv("COMPLETED_LOG", "completed_ids.txt")
+DEFAULT_SIDECAR_FOLDER = os.getenv("SIDECAR_FOLDER", FALLBACK_SIDECAR_FOLDER)
+DEFAULT_COMPLETED_LOG = os.getenv("COMPLETED_LOG", DEFAULT_LEGACY_COMPLETED_LOG)
+DEFAULT_STATE_PATH = os.getenv("GOSYNC_STATE_FILE", DEFAULT_STATE_FILE)
+DEFAULT_BATCH_MAX_BYTES = os.getenv("BATCH_MAX_BYTES", "auto")
 DEFAULT_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))
 DEFAULT_MAX_RETRY_PASSES = int(os.getenv("MAX_RETRY_PASSES", "3"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
@@ -27,7 +36,7 @@ ACCESS_LOGS = os.getenv("ACCESS_LOGS", "true").lower() in {"1", "true", "yes", "
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Download and recover GoPro cloud media from a HAR file."
+        description="Download GoPro Cloud media from a HAR file."
     )
     parser.add_argument(
         "--version",
@@ -42,22 +51,47 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--har-file",
         default=os.getenv("HAR_FILE"),
-        help="HAR filename or path. Defaults to gopro.com.har, then any single *.har file.",
+        help=(
+            "HAR filename or path. Defaults to gopro.com.har, then any single "
+            "*.har file."
+        ),
     )
     parser.add_argument(
         "--output-folder",
         default=DEFAULT_OUTPUT_FOLDER,
-        help="Download folder name or path. Relative paths are created inside data-dir.",
+        help=(
+            "Download folder name or path. Relative paths are created inside "
+            "data-dir."
+        ),
     )
     parser.add_argument(
         "--sidecar-folder",
         default=DEFAULT_SIDECAR_FOLDER,
-        help="XMP sidecar folder name or path. Relative paths are created inside data-dir.",
+        help=(
+            "Deprecated. XMP sidecars are written next to media files inside "
+            "the download folder."
+        ),
     )
     parser.add_argument(
         "--completed-log",
         default=DEFAULT_COMPLETED_LOG,
-        help="Completion ledger name or path. Relative paths are created inside data-dir.",
+        help=(
+            "Legacy completion ledger imported for compatibility. "
+            "New resume state is stored in --state-file."
+        ),
+    )
+    parser.add_argument(
+        "--state-file",
+        default=DEFAULT_STATE_PATH,
+        help="JSON state filename or path. Relative paths are created inside data-dir.",
+    )
+    parser.add_argument(
+        "--batch-max-bytes",
+        default=DEFAULT_BATCH_MAX_BYTES,
+        help=(
+            "Maximum total source bytes per download batch. Use 'auto' to use "
+            "the largest file_size from the HAR manifest."
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -74,7 +108,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--run-once",
         action="store_true",
-        help="Run the downloader once from the command line instead of starting the web UI.",
+        help=(
+            "Run the downloader once from the command line instead of starting "
+            "the web UI."
+        ),
     )
     return parser.parse_args()
 

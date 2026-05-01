@@ -33,7 +33,7 @@ Commit the release changes:
 ```bash
 git status
 git add Dockerfile README.md docker-compose.yml src/gosync/__init__.py src/gosync/app.py src/gosync/config.py src/gosync/templates/index.html src/gosync/web.py .github/workflows/docker-publish.yml docs/release.md
-git commit -m "Release GoSync 1.0.3"
+git commit -m "Release GoSync <version>"
 git push origin main
 ```
 
@@ -42,8 +42,8 @@ git push origin main
 Create and push a matching git tag:
 
 ```bash
-git tag v1.0.3
-git push origin v1.0.3
+git tag v<version>
+git push origin v<version>
 ```
 
 The GitHub Actions workflow publishes the versioned image after the tag push.
@@ -55,7 +55,7 @@ TrueNAS or Docker Compose.
 After the workflow succeeds, confirm the versioned image can be pulled:
 
 ```bash
-docker pull ghcr.io/prabhanshuattri/gosync:1.0.3
+docker pull ghcr.io/prabhanshuattri/gosync:<version>
 ```
 
 If TrueNAS reports `manifest unknown`, the version tag has not been published

@@ -7,13 +7,25 @@ from flask import Flask, jsonify, redirect, render_template, request, url_for
 from werkzeug.utils import secure_filename
 
 from gosync import __version__
+from gosync.constants import STATUS_DOWNLOADED
 from gosync.config import IS_PROD, ACCESS_LOGS
 from gosync.config import resolve_inside_data_dir
-from gosync.downloader import extract_ids, get_completed_ids
 from gosync.logging_config import LOGGER, configure_file_logging
+from gosync.manifest import (
+    format_extension_summary,
+    read_manifest_from_har,
+    write_manifest,
+    write_media_responses_dump,
+)
+from gosync.paths import media_download_path, sidecar_output_path
 from gosync.progress import ProgressState
-from gosync.runtime import run_download_job
-from gosync.sidecar import read_media_from_har, run_sidecar_job, sidecar_stem
+from gosync.runtime import get_runtime_paths, run_download_job
+from gosync.sidecar import run_sidecar_job
+from gosync.state import (
+    completed_count as state_completed_count,
+    create_or_update_state,
+    sync_state_with_downloads,
+)
 
 
 PROGRESS = ProgressState()
@@ -74,31 +86,44 @@ def create_app(args: argparse.Namespace) -> Flask:
             return
 
         try:
-            har_path = data_dir / current_har
-            completed_log = resolve_inside_data_dir(
-                data_dir,
-                args.completed_log,
-            ).resolve()
+            (
+                data_path,
+                har_path,
+                output_dir,
+                _sidecar_dir,
+                state_file,
+                manifest_file,
+                media_dump_file,
+            ) = get_runtime_paths(args, current_har)
             cache_key = (
                 str(har_path),
                 har_path.stat().st_mtime,
-                str(completed_log),
-                completed_log.stat().st_mtime if completed_log.exists() else 0,
+                str(state_file),
+                state_file.stat().st_mtime if state_file.exists() else 0,
             )
 
             if RESUME_CACHE.get("key") == cache_key:
                 total_ids = int(RESUME_CACHE["total_ids"])
                 completed_count = int(RESUME_CACHE["completed_ids"])
             else:
-                ids = extract_ids(har_path)
-                completed_ids = get_completed_ids(completed_log)
-                total_ids = len(ids)
-                completed_count = len(completed_ids.intersection(ids))
+                manifest = read_manifest_from_har(har_path)
+                write_manifest(manifest, manifest_file, har_path)
+                write_media_responses_dump(manifest, media_dump_file, har_path)
+                create_or_update_state(state_file, manifest, data_path)
+                state, _changes = sync_state_with_downloads(state_file, output_dir)
+                total_ids = len(manifest.media)
+                completed_count = state_completed_count(state)
                 RESUME_CACHE.update(
                     key=cache_key,
                     total_ids=total_ids,
                     completed_ids=completed_count,
                 )
+
+            summary_key = (str(har_path), har_path.stat().st_mtime)
+            if RESUME_CACHE.get("summary_key") != summary_key:
+                manifest = read_manifest_from_har(har_path)
+                PROGRESS.log_background(format_extension_summary(manifest))
+                RESUME_CACHE["summary_key"] = summary_key
 
             PROGRESS.update(
                 total_ids=total_ids,
@@ -111,65 +136,90 @@ def create_app(args: argparse.Namespace) -> Flask:
 
     def media_sidecar_rows() -> list[dict[str, str]]:
         output_dir = resolve_inside_data_dir(data_dir, args.output_folder).resolve()
-        sidecar_dir = resolve_inside_data_dir(data_dir, args.sidecar_folder).resolve()
-        completed_log = resolve_inside_data_dir(
-            data_dir,
-            args.completed_log,
-        ).resolve()
-        completed_ids = get_completed_ids(completed_log)
         current_har = selected_har_file()
-        media_id_by_filename: dict[str, str] = {}
+        state_records: list[dict[str, object]] = []
 
         if current_har:
             try:
-                har_path = data_dir / current_har
-                cache_key = (str(har_path), har_path.stat().st_mtime)
+                (
+                    data_path,
+                    har_path,
+                    output_dir,
+                    _sidecar_dir,
+                    state_file,
+                    manifest_file,
+                    media_dump_file,
+                ) = get_runtime_paths(args, current_har)
+                cache_key = (
+                    str(har_path),
+                    har_path.stat().st_mtime,
+                    str(state_file),
+                    state_file.stat().st_mtime if state_file.exists() else 0,
+                )
 
                 if MEDIA_ID_CACHE.get("key") == cache_key:
-                    media_id_by_filename = dict(MEDIA_ID_CACHE["media_id_by_filename"])
+                    state_records = list(MEDIA_ID_CACHE["state_records"])
                 else:
-                    media_items, _matching_entries = read_media_from_har(har_path)
-                    media_id_by_filename = {
-                        sidecar_stem(item): str(item["id"])
-                        for item in media_items
-                        if item.get("id")
-                    }
+                    manifest = read_manifest_from_har(har_path)
+                    write_manifest(manifest, manifest_file, har_path)
+                    write_media_responses_dump(manifest, media_dump_file, har_path)
+                    create_or_update_state(state_file, manifest, data_path)
+                    state, _changes = sync_state_with_downloads(state_file, output_dir)
+                    media = state.get("media", {})
+                    state_records = (
+                        list(media.values()) if isinstance(media, dict) else []
+                    )
                     MEDIA_ID_CACHE.update(
                         key=cache_key,
-                        media_id_by_filename=media_id_by_filename,
+                        state_records=state_records,
                     )
             except Exception:
-                media_id_by_filename = {}
+                state_records = []
 
-        downloaded_files = {
-            path.name: path
-            for path in output_dir.iterdir()
-            if path.is_file() and path.name != "completed_ids.txt"
-        } if output_dir.exists() else {}
         sidecar_files = {
             path.name.removesuffix(".xmp"): path
-            for path in sidecar_dir.glob("*.xmp")
+            for path in output_dir.glob("*/*.xmp")
             if path.is_file()
-        } if sidecar_dir.exists() else {}
+        } if output_dir.exists() else {}
 
         rows = []
-        filenames = set(downloaded_files).union(sidecar_files)
-        for filename in sorted(
-            filenames,
-            key=lambda name: (name in downloaded_files, name.lower()),
+        current_batch_keys = set(PROGRESS.snapshot().get("current_batch_keys", []))
+        for record in sorted(
+            state_records,
+            key=lambda item: str(item.get("filename", "")).lower(),
         ):
-            sidecar_path = sidecar_files.get(filename)
-            media_id = media_id_by_filename.get(filename)
-            downloaded = (
-                media_id in completed_ids
-                if media_id
-                else filename in downloaded_files
+            filename = str(record.get("filename") or "")
+            sidecar_filename = str(record.get("sidecar_filename") or "")
+            sidecar_stem = sidecar_filename.removesuffix(".xmp")
+            sidecar_path = sidecar_output_path(
+                output_dir,
+                filename,
+                sidecar_filename,
+            )
+            fallback_sidecar_path = sidecar_files.get(sidecar_stem)
+            status = (
+                "downloading"
+                if str(record.get("key") or "") in current_batch_keys
+                else (
+                    "downloaded"
+                    if record.get("download_status") == STATUS_DOWNLOADED
+                    or media_download_path(output_dir, filename).is_file()
+                    else "pending"
+                )
             )
             rows.append(
                 {
                     "filename": filename,
-                    "sidecar_filename": sidecar_path.name if sidecar_path else "",
-                    "status": "downloaded" if downloaded else "pending",
+                    "sidecar_filename": (
+                        sidecar_path.name
+                        if sidecar_path.is_file()
+                        else (
+                            fallback_sidecar_path.name
+                            if fallback_sidecar_path
+                            else sidecar_filename
+                        )
+                    ),
+                    "status": status,
                 }
             )
         return rows
@@ -200,6 +250,25 @@ def create_app(args: argparse.Namespace) -> Flask:
         uploaded.save(data_dir / filename)
         args.har_file = filename
         PROGRESS.log_event(f"Uploaded HAR file: {filename}", state_label="Uploaded")
+        try:
+            (
+                data_path,
+                har_path,
+                output_dir,
+                _sidecar_dir,
+                state_file,
+                manifest_file,
+                media_dump_file,
+            ) = get_runtime_paths(args, filename)
+            manifest = read_manifest_from_har(har_path)
+            write_manifest(manifest, manifest_file, har_path)
+            write_media_responses_dump(manifest, media_dump_file, har_path)
+            create_or_update_state(state_file, manifest, data_path)
+            sync_state_with_downloads(state_file, output_dir)
+            PROGRESS.log_background(format_extension_summary(manifest))
+        except Exception as exc:
+            LOGGER.warning("Failed to summarize uploaded HAR file %s: %s", filename, exc)
+            PROGRESS.log_background(f"Could not summarize uploaded HAR: {exc}")
         return redirect(url_for("index"))
 
     @app.post("/start")
@@ -208,26 +277,35 @@ def create_app(args: argparse.Namespace) -> Flask:
 
         selected_har = request.form.get("har_file") or args.har_file
         with JOB_LOCK:
-            if JOB_THREAD and JOB_THREAD.is_alive():
-                PROGRESS.log("A download is already running.")
+            if (JOB_THREAD and JOB_THREAD.is_alive()) or (
+                SIDECAR_THREAD and SIDECAR_THREAD.is_alive()
+            ):
+                PROGRESS.log("A job is already running.")
                 return redirect(url_for("index"))
 
             if not selected_har:
                 PROGRESS.log("No HAR file selected.")
                 return redirect(url_for("index"))
 
-            har_path = Path(selected_har)
-            if not har_path.is_absolute():
-                har_path = data_dir / selected_har
-            sidecar_dir = resolve_inside_data_dir(
-                data_dir,
-                args.sidecar_folder,
-            ).resolve()
+            (
+                data_path,
+                har_path,
+                output_dir,
+                sidecar_dir,
+                state_file,
+                manifest_file,
+                media_dump_file,
+            ) = get_runtime_paths(args, selected_har)
+            manifest = read_manifest_from_har(har_path)
+            write_manifest(manifest, manifest_file, har_path)
+            write_media_responses_dump(manifest, media_dump_file, har_path)
+            create_or_update_state(state_file, manifest, data_path)
+            sync_state_with_downloads(state_file, output_dir)
             PROGRESS.update(
                 notifications=[],
                 sidecar_status="pending",
                 sidecar_count=0,
-                sidecar_dir=str(sidecar_dir),
+                sidecar_dir=str(output_dir),
                 sidecar_message="XMP sidecar generation queued.",
             )
 
@@ -238,7 +316,7 @@ def create_app(args: argparse.Namespace) -> Flask:
             )
             SIDECAR_THREAD = threading.Thread(
                 target=run_sidecar_job,
-                args=(har_path, sidecar_dir, PROGRESS),
+                args=(har_path, output_dir, PROGRESS, manifest.media, state_file),
                 daemon=True,
             )
             SIDECAR_THREAD.start()
@@ -250,7 +328,10 @@ def create_app(args: argparse.Namespace) -> Flask:
     def stop():
         if JOB_THREAD and JOB_THREAD.is_alive():
             PROGRESS.update(stop_requested=True, state_label="Stopping")
-            PROGRESS.log_event("Stop requested. Finishing current cleanup...", "Stopping")
+            PROGRESS.log_event(
+                "Stop requested. Finishing current cleanup...",
+                "Stopping",
+            )
         else:
             PROGRESS.log_event("No active download job to stop.", PROGRESS.state_label)
         return redirect(url_for("index"))

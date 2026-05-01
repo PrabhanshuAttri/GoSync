@@ -5,10 +5,11 @@ file. It does not call another metadata API for sidecars.
 
 ## Flow
 
-When a web download job starts, GoSync starts two background threads:
+When a web download job starts, GoSync parses the HAR into a shared manifest and
+starts two background threads:
 
 - the media download thread, which downloads and extracts media files
-- the sidecar thread, which parses the selected HAR and writes XMP files
+- the sidecar thread, which uses the manifest metadata and writes XMP files
 
 The sidecar thread runs independently. Its status is shown as a secondary XMP
 line in Current Activity and in the Event Log. It does not stop or block media
@@ -35,10 +36,12 @@ media objects.
 
 ## Output
 
-Sidecars are written to the configured sidecar folder:
+Sidecars are written next to their media files in lowercase extension folders
+inside the configured download folder:
 
 ```text
-data/sidecars/
+data/downloads/mp4/GX010001.MP4
+data/downloads/mp4/GX010001.MP4.xmp
 ```
 
 The default name format is:

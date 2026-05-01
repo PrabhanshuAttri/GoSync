@@ -13,7 +13,7 @@ services:
     container_name: gosync
     labels:
       org.opencontainers.image.title: GoSync
-      org.opencontainers.image.description: GoPro cloud library recovery and downloader
+      org.opencontainers.image.description: GoPro Cloud library download tool
       org.opencontainers.image.source: https://github.com/prabhanshuattri/GoSync
       org.opencontainers.image.url: https://github.com/prabhanshuattri/GoSync
       org.opencontainers.image.vendor: prabhanshuattri
@@ -24,8 +24,8 @@ services:
       HAR_FILE: ${HAR_FILE:-gopro.com.har}
       DOWNLOAD_FOLDER: ${DOWNLOAD_FOLDER:-downloads}
       COMPLETED_LOG: ${COMPLETED_LOG:-completed_ids.txt}
-      BATCH_SIZE: ${BATCH_SIZE:-5}
-      MAX_RETRY_PASSES: ${MAX_RETRY_PASSES:-3}
+      GOSYNC_STATE_FILE: ${GOSYNC_STATE_FILE:-gosync_state.json}
+      BATCH_MAX_BYTES: ${BATCH_MAX_BYTES:-auto}
       WEB_HOST: 0.0.0.0
       WEB_PORT: 8080
       ACCESS_LOGS: ${ACCESS_LOGS:-true}
