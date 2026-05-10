@@ -80,8 +80,6 @@ Files and folders:
 - `gosync_state.json`: JSON resume state for every parsed media item,
   configurable with `GOSYNC_STATE_FILE`.
 - `reports/`: run reports written when downloads complete or stop.
-- `completed_ids.txt`: legacy resume ledger imported once for backward
-  compatibility.
 - `gopro_temp_batch.zip`: temporary zip file used during a batch download;
   deleted after extraction or failure.
 
@@ -99,7 +97,6 @@ sensitive field exclusions.
 | `DOWNLOAD_FOLDER` | `downloads` | Download output folder. Relative paths are resolved inside `DATA_DIR`. |
 | `SIDECAR_FOLDER` | `sidecars` | Deprecated. XMP sidecars are written next to media files inside `DOWNLOAD_FOLDER`. |
 | `GOSYNC_STATE_FILE` | `gosync_state.json` | JSON state file for all parsed media items. Relative paths are resolved inside `DATA_DIR`. |
-| `COMPLETED_LOG` | `completed_ids.txt` | Legacy resume ledger imported once for backward compatibility. |
 | `BATCH_MAX_BYTES` | `auto` | Requested maximum total source bytes per zip batch. Values above the largest `file_size` in the HAR manifest are capped to that largest file size. |
 | `BATCH_SIZE` | `5` | Deprecated; retained for compatibility but not used by size-based batching. |
 | `MAX_RETRY_PASSES` | `3` | Deprecated; multi-file failures split into one-file retries, and single-file batches retry up to 3 times. |

@@ -3,13 +3,13 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+from gosync.config import resolve_inside_data_dir
 from gosync.constants import (
     DEFAULT_MANIFEST_FILE,
     DEFAULT_MEDIA_RESPONSES_FILE,
     STATUS_COMPLETE,
     STATUS_STOPPED,
 )
-from gosync.config import resolve_inside_data_dir
 from gosync.downloader import (
     DownloadCancelled,
     extract_browser_headers,
@@ -30,6 +30,7 @@ from gosync.sidecar import run_sidecar_job
 from gosync.state import (
     completed_count,
     create_or_update_state,
+    format_downloaded_extension_summary,
     load_state,
     sync_state_with_downloads,
 )
@@ -63,7 +64,6 @@ def get_runtime_paths(
 
 
 def prepare_manifest_state(
-    data_dir: Path,
     har_path: Path,
     output_dir: Path,
     state_file: Path,
@@ -83,7 +83,7 @@ def prepare_manifest_state(
                 f"{duplicate.filename} ({duplicate.media_id})"
             )
 
-    create_or_update_state(state_file, manifest, data_dir)
+    create_or_update_state(state_file, manifest)
     state, sync_changes = sync_state_with_downloads(state_file, output_dir)
     if progress:
         for change in sync_changes:
@@ -93,6 +93,32 @@ def prepare_manifest_state(
             )
 
     return manifest, state, sync_changes
+
+
+def startup_media_summaries(args: argparse.Namespace) -> list[str]:
+    try:
+        (
+            _data_dir,
+            har_path,
+            output_dir,
+            _sidecar_dir,
+            state_file,
+            manifest_file,
+            media_dump_file,
+        ) = get_runtime_paths(args)
+        manifest, state, _sync_changes = prepare_manifest_state(
+            har_path,
+            output_dir,
+            state_file,
+            manifest_file,
+            media_dump_file,
+        )
+    except Exception:
+        return []
+    return [
+        format_extension_summary(manifest),
+        format_downloaded_extension_summary(state),
+    ]
 
 
 def run_once(args: argparse.Namespace) -> int:
@@ -127,14 +153,15 @@ def run_once(args: argparse.Namespace) -> int:
         args.batch_max_bytes,
     )
 
-    manifest, _state, sync_changes = prepare_manifest_state(
-        data_dir,
+    manifest, state, sync_changes = prepare_manifest_state(
         har_path,
         output_dir,
         state_file,
         manifest_file,
         media_dump_file,
     )
+    print(format_extension_summary(manifest), flush=True)
+    print(format_downloaded_extension_summary(state), flush=True)
     headers = extract_browser_headers(har_path)
     try:
         run_sidecar_job(
@@ -224,7 +251,6 @@ def run_download_job(
         )
         progress.log(f"Scanning HAR file: {har_path.name}")
         manifest, state, sync_changes = prepare_manifest_state(
-            data_dir,
             har_path,
             output_dir,
             state_file,

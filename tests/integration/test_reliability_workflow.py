@@ -20,7 +20,6 @@ def test_prepare_manifest_state_writes_manifest_media_dump_and_state(
     downloads = tmp_path / "downloads"
 
     manifest, state, changes = prepare_manifest_state(
-        tmp_path,
         har_path,
         downloads,
         state_file,
@@ -59,7 +58,6 @@ def test_resume_sync_detects_files_added_and_removed_after_prepare(
     state_file = tmp_path / "gosync_state.json"
     downloads = tmp_path / "downloads"
     prepare_manifest_state(
-        tmp_path,
         har_path,
         downloads,
         state_file,
@@ -99,7 +97,6 @@ def test_sidecar_job_uses_manifest_items_and_updates_json_state(
     state_file = tmp_path / "gosync_state.json"
     downloads = tmp_path / "downloads"
     manifest, _state, _changes = prepare_manifest_state(
-        tmp_path,
         har_path,
         downloads,
         state_file,
@@ -144,7 +141,6 @@ def test_run_summary_and_report_reflect_prepared_manifest_duplicates(
     state_file = tmp_path / "gosync_state.json"
     downloads = tmp_path / "downloads"
     manifest, state, _changes = prepare_manifest_state(
-        tmp_path,
         har_path,
         downloads,
         state_file,
@@ -184,4 +180,3 @@ def test_run_summary_and_report_reflect_prepared_manifest_duplicates(
             "key": "ABCDEFGHIJKLM_GX010001.MP4",
         }
     ]
-

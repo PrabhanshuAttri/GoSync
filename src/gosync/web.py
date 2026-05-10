@@ -7,9 +7,8 @@ from flask import Flask, jsonify, redirect, render_template, request, url_for
 from werkzeug.utils import secure_filename
 
 from gosync import __version__
+from gosync.config import ACCESS_LOGS, IS_PROD, resolve_inside_data_dir
 from gosync.constants import STATUS_DOWNLOADED
-from gosync.config import IS_PROD, ACCESS_LOGS
-from gosync.config import resolve_inside_data_dir
 from gosync.logging_config import LOGGER, configure_file_logging
 from gosync.manifest import (
     format_extension_summary,
@@ -23,10 +22,12 @@ from gosync.runtime import get_runtime_paths, run_download_job
 from gosync.sidecar import run_sidecar_job
 from gosync.state import (
     completed_count as state_completed_count,
+)
+from gosync.state import (
     create_or_update_state,
+    downloaded_filename_index,
     sync_state_with_downloads,
 )
-
 
 PROGRESS = ProgressState()
 JOB_THREAD: threading.Thread | None = None
@@ -55,12 +56,11 @@ def create_app(args: argparse.Namespace) -> Flask:
     werkzeug_logger = logging.getLogger("werkzeug")
     if not ACCESS_LOGS:
         werkzeug_logger.setLevel(logging.ERROR)
-    elif IS_PROD:
-        if not any(
-            isinstance(log_filter, StatusAccessLogFilter)
-            for log_filter in werkzeug_logger.filters
-        ):
-            werkzeug_logger.addFilter(StatusAccessLogFilter())
+    elif IS_PROD and not any(
+        isinstance(log_filter, StatusAccessLogFilter)
+        for log_filter in werkzeug_logger.filters
+    ):
+        werkzeug_logger.addFilter(StatusAccessLogFilter())
 
     app = Flask(__name__)
     LOGGER.info("Starting GoSync web app. data_dir=%s", data_dir)
@@ -87,7 +87,7 @@ def create_app(args: argparse.Namespace) -> Flask:
 
         try:
             (
-                data_path,
+                _data_path,
                 har_path,
                 output_dir,
                 _sidecar_dir,
@@ -100,6 +100,8 @@ def create_app(args: argparse.Namespace) -> Flask:
                 har_path.stat().st_mtime,
                 str(state_file),
                 state_file.stat().st_mtime if state_file.exists() else 0,
+                str(output_dir),
+                output_dir.stat().st_mtime if output_dir.exists() else 0,
             )
 
             if RESUME_CACHE.get("key") == cache_key:
@@ -109,7 +111,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                 manifest = read_manifest_from_har(har_path)
                 write_manifest(manifest, manifest_file, har_path)
                 write_media_responses_dump(manifest, media_dump_file, har_path)
-                create_or_update_state(state_file, manifest, data_path)
+                create_or_update_state(state_file, manifest)
                 state, _changes = sync_state_with_downloads(state_file, output_dir)
                 total_ids = len(manifest.media)
                 completed_count = state_completed_count(state)
@@ -142,7 +144,7 @@ def create_app(args: argparse.Namespace) -> Flask:
         if current_har:
             try:
                 (
-                    data_path,
+                    _data_path,
                     har_path,
                     output_dir,
                     _sidecar_dir,
@@ -155,6 +157,8 @@ def create_app(args: argparse.Namespace) -> Flask:
                     har_path.stat().st_mtime,
                     str(state_file),
                     state_file.stat().st_mtime if state_file.exists() else 0,
+                    str(output_dir),
+                    output_dir.stat().st_mtime if output_dir.exists() else 0,
                 )
 
                 if MEDIA_ID_CACHE.get("key") == cache_key:
@@ -163,7 +167,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                     manifest = read_manifest_from_har(har_path)
                     write_manifest(manifest, manifest_file, har_path)
                     write_media_responses_dump(manifest, media_dump_file, har_path)
-                    create_or_update_state(state_file, manifest, data_path)
+                    create_or_update_state(state_file, manifest)
                     state, _changes = sync_state_with_downloads(state_file, output_dir)
                     media = state.get("media", {})
                     state_records = (
@@ -183,6 +187,7 @@ def create_app(args: argparse.Namespace) -> Flask:
         } if output_dir.exists() else {}
 
         rows = []
+        existing_filenames = downloaded_filename_index(output_dir)
         current_batch_keys = set(PROGRESS.snapshot().get("current_batch_keys", []))
         for record in sorted(
             state_records,
@@ -204,6 +209,8 @@ def create_app(args: argparse.Namespace) -> Flask:
                     "downloaded"
                     if record.get("download_status") == STATUS_DOWNLOADED
                     or media_download_path(output_dir, filename).is_file()
+                    or (output_dir / filename).is_file()
+                    or filename.casefold() in existing_filenames
                     else "pending"
                 )
             )
@@ -252,7 +259,7 @@ def create_app(args: argparse.Namespace) -> Flask:
         PROGRESS.log_event(f"Uploaded HAR file: {filename}", state_label="Uploaded")
         try:
             (
-                data_path,
+                _data_path,
                 har_path,
                 output_dir,
                 _sidecar_dir,
@@ -263,11 +270,15 @@ def create_app(args: argparse.Namespace) -> Flask:
             manifest = read_manifest_from_har(har_path)
             write_manifest(manifest, manifest_file, har_path)
             write_media_responses_dump(manifest, media_dump_file, har_path)
-            create_or_update_state(state_file, manifest, data_path)
+            create_or_update_state(state_file, manifest)
             sync_state_with_downloads(state_file, output_dir)
             PROGRESS.log_background(format_extension_summary(manifest))
         except Exception as exc:
-            LOGGER.warning("Failed to summarize uploaded HAR file %s: %s", filename, exc)
+            LOGGER.warning(
+                "Failed to summarize uploaded HAR file %s: %s",
+                filename,
+                exc,
+            )
             PROGRESS.log_background(f"Could not summarize uploaded HAR: {exc}")
         return redirect(url_for("index"))
 
@@ -288,7 +299,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                 return redirect(url_for("index"))
 
             (
-                data_path,
+                _data_path,
                 har_path,
                 output_dir,
                 sidecar_dir,
@@ -299,7 +310,7 @@ def create_app(args: argparse.Namespace) -> Flask:
             manifest = read_manifest_from_har(har_path)
             write_manifest(manifest, manifest_file, har_path)
             write_media_responses_dump(manifest, media_dump_file, har_path)
-            create_or_update_state(state_file, manifest, data_path)
+            create_or_update_state(state_file, manifest)
             sync_state_with_downloads(state_file, output_dir)
             PROGRESS.update(
                 notifications=[],

@@ -12,8 +12,8 @@ from urllib3.util.retry import Retry
 
 from gosync.config import REQUEST_TIMEOUT
 from gosync.constants import (
-    DEFAULT_HEADERS,
     DEFAULT_HAR_FILE,
+    DEFAULT_HEADERS,
     DEFAULT_TEMP_ZIP,
     MAX_SINGLE_FILE_RETRIES,
     SKIPPED_HAR_HEADERS,
@@ -24,6 +24,8 @@ from gosync.paths import media_download_path
 from gosync.progress import ProgressState
 from gosync.state import (
     completed_count as state_completed_count,
+)
+from gosync.state import (
     mark_downloaded,
     mark_failed,
     pending_keys,
@@ -188,23 +190,6 @@ def extract_browser_headers(har_path: Path) -> dict[str, str]:
         )
 
     return headers
-
-
-def get_completed_ids(completed_log: Path) -> set[str]:
-    completed_log.parent.mkdir(parents=True, exist_ok=True)
-    completed_log.touch(exist_ok=True)
-
-    if not completed_log.exists():
-        return set()
-
-    content = completed_log.read_text(encoding="utf-8", errors="ignore")
-    return {media_id.strip() for media_id in content.split(",") if media_id.strip()}
-
-
-def log_completed_ids(completed_log: Path, batch_ids: list[str]) -> None:
-    completed_log.parent.mkdir(parents=True, exist_ok=True)
-    with completed_log.open("a", encoding="utf-8") as file:
-        file.write(",".join(batch_ids) + ",")
 
 
 def build_batches(ids: list[str], batch_size: int) -> list[list[str]]:
@@ -417,7 +402,9 @@ def process_pipeline(
         batch_index += 1
         batch_ids = [item.media_id for item in batch]
         batch_keys = [item.key for item in batch]
-        batch_file_list = "\n".join(f"  - {format_media_for_log(item)}" for item in batch)
+        batch_file_list = "\n".join(
+            f"  - {format_media_for_log(item)}" for item in batch
+        )
         message = (
             f"Processing batch {batch_index} ({len(batch)} "
             f"{pluralize(len(batch), 'file')})\nFiles in batch:\n{batch_file_list}"

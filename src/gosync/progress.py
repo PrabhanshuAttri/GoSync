@@ -3,7 +3,6 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 
-
 LOGGER = logging.getLogger("gosync.progress")
 
 

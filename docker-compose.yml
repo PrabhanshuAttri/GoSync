@@ -23,11 +23,11 @@ services:
       DATA_DIR: /data
       HAR_FILE: ${HAR_FILE:-gopro.com.har}
       DOWNLOAD_FOLDER: ${DOWNLOAD_FOLDER:-downloads}
-      COMPLETED_LOG: ${COMPLETED_LOG:-completed_ids.txt}
       GOSYNC_STATE_FILE: ${GOSYNC_STATE_FILE:-gosync_state.json}
       BATCH_MAX_BYTES: ${BATCH_MAX_BYTES:-auto}
       WEB_HOST: 0.0.0.0
       WEB_PORT: 8080
+      GOSYNC_WEB_PORT: ${GOSYNC_WEB_PORT:-49152}
       ACCESS_LOGS: ${ACCESS_LOGS:-true}
     ports:
       - ${GOSYNC_WEB_PORT:-49152}:8080

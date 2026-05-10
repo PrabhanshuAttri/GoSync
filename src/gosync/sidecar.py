@@ -25,7 +25,6 @@ from gosync.paths import sidecar_output_path
 from gosync.progress import ProgressState
 from gosync.state import mark_sidecars
 
-
 LOGGER = logging.getLogger("gosync.sidecar")
 
 
@@ -34,7 +33,7 @@ def xml_value(value: Any) -> str:
         return "True" if value else "False"
     if value is None:
         return ""
-    if isinstance(value, (dict, list)):
+    if isinstance(value, dict | list):
         return json.dumps(value, sort_keys=True, separators=(",", ":"))
     return str(value)
 

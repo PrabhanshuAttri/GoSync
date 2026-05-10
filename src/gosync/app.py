@@ -1,9 +1,7 @@
 from gosync import __version__
-from gosync.config import DEBUG
-
-from gosync.config import WEB_HOST, WEB_PORT, parse_args
+from gosync.config import DEBUG, DISPLAY_WEB_PORT, WEB_HOST, WEB_PORT, parse_args
 from gosync.logging_config import LOGGER
-from gosync.runtime import run_once
+from gosync.runtime import run_once, startup_media_summaries
 from gosync.web import create_app
 
 
@@ -16,7 +14,9 @@ def main() -> int:
     print("========================================", flush=True)
     print(f"              GoSync {__version__}              ", flush=True)
     print("========================================", flush=True)
-    print(f"Open http://localhost:{WEB_PORT}", flush=True)
+    print(f"Open http://localhost:{DISPLAY_WEB_PORT}", flush=True)
+    for summary in startup_media_summaries(args):
+        print(summary, flush=True)
     print(f"Debug mode: {'enabled' if DEBUG else 'disabled'}", flush=True)
     LOGGER.info(
         "Starting Flask server. host=%s port=%s debug=%s",

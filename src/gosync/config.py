@@ -5,12 +5,14 @@ from pathlib import Path
 from gosync import __version__
 from gosync.constants import (
     DEFAULT_DATA_DIR as FALLBACK_DATA_DIR,
+)
+from gosync.constants import (
     DEFAULT_DOWNLOAD_FOLDER,
-    DEFAULT_LEGACY_COMPLETED_LOG,
-    DEFAULT_SIDECAR_FOLDER as FALLBACK_SIDECAR_FOLDER,
     DEFAULT_STATE_FILE,
 )
-
+from gosync.constants import (
+    DEFAULT_SIDECAR_FOLDER as FALLBACK_SIDECAR_FOLDER,
+)
 
 ENV = os.getenv("ENV", "production").lower()
 IS_PROD = ENV in {"prod", "production"}
@@ -21,7 +23,6 @@ DEFAULT_OUTPUT_FOLDER = os.getenv(
     os.getenv("OUTPUT_FOLDER", DEFAULT_DOWNLOAD_FOLDER),
 )
 DEFAULT_SIDECAR_FOLDER = os.getenv("SIDECAR_FOLDER", FALLBACK_SIDECAR_FOLDER)
-DEFAULT_COMPLETED_LOG = os.getenv("COMPLETED_LOG", DEFAULT_LEGACY_COMPLETED_LOG)
 DEFAULT_STATE_PATH = os.getenv("GOSYNC_STATE_FILE", DEFAULT_STATE_FILE)
 DEFAULT_BATCH_MAX_BYTES = os.getenv("BATCH_MAX_BYTES", "auto")
 DEFAULT_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))
@@ -29,6 +30,7 @@ DEFAULT_MAX_RETRY_PASSES = int(os.getenv("MAX_RETRY_PASSES", "3"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
+DISPLAY_WEB_PORT = int(os.getenv("GOSYNC_WEB_PORT", str(WEB_PORT)))
 ACCESS_LOGS = os.getenv("ACCESS_LOGS", "true").lower() in {"1", "true", "yes", "on"}
 
 
@@ -70,14 +72,6 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Deprecated. XMP sidecars are written next to media files inside "
             "the download folder."
-        ),
-    )
-    parser.add_argument(
-        "--completed-log",
-        default=DEFAULT_COMPLETED_LOG,
-        help=(
-            "Legacy completion ledger imported for compatibility. "
-            "New resume state is stored in --state-file."
         ),
     )
     parser.add_argument(
