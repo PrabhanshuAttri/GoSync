@@ -76,7 +76,7 @@ def format_extension_summary(manifest: MediaManifest) -> str:
     summary = ", ".join(
         f"{extension.upper()}: {count}" for extension, count in counts.items()
     )
-    return f"Media by extension: {summary}"
+    return f"HAR Media by extension: {summary}"
 
 
 def parse_response_text(text: str, entry_number: int) -> Any | None:

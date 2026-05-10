@@ -12,6 +12,7 @@ from gosync.state import (
     mark_downloaded,
     mark_failed,
     mark_sidecars,
+    media_file_exists,
     pending_keys,
     save_state,
     sync_state_with_downloads,
@@ -109,6 +110,34 @@ def test_sync_state_with_downloads_finds_case_variant_nested_media_files(
 
     assert changes == [{"id": "A", "filename": item.filename, "status": "found"}]
     assert state["media"][item.key]["download_status"] == STATUS_DOWNLOADED
+
+
+def test_media_file_exists_rejects_parent_directory_traversal(
+    tmp_path: Path,
+) -> None:
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    outside_file = tmp_path / "outside.mp4"
+    outside_file.write_text("done", encoding="utf-8")
+
+    assert not media_file_exists(downloads, "../outside.mp4")
+
+
+def test_sync_state_with_downloads_ignores_files_outside_output_dir(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    item = make_media_item("A", "../outside.mp4", 50)
+    state_file = tmp_path / "state.json"
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    (tmp_path / "outside.mp4").write_text("done", encoding="utf-8")
+    create_or_update_state(state_file, manifest_for_state([item]))
+
+    state, changes = sync_state_with_downloads(state_file, downloads)
+
+    assert changes == []
+    assert state["media"][item.key]["download_status"] == STATUS_PENDING
 
 
 def test_state_markers_update_counts_and_errors(

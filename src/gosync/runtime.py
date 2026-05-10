@@ -1,4 +1,5 @@
 import argparse
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -36,30 +37,51 @@ from gosync.state import (
 )
 
 
+@dataclass(frozen=True)
+class RuntimePaths:
+    data_dir: Path
+    har_path: Path
+    output_dir: Path
+    sidecar_dir: Path
+    state_file: Path
+    manifest_file: Path
+    media_dump_file: Path
+
+
+@dataclass(frozen=True)
+class PreparedManifestState:
+    paths: RuntimePaths
+    manifest: MediaManifest
+    state: dict
+    sync_changes: list[dict[str, str]]
+
+
 def get_runtime_paths(
     args: argparse.Namespace,
     har_file: str | None = None,
-) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
+) -> RuntimePaths:
     data_dir = Path(args.data_dir).expanduser().resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    har_path = resolve_har_file(data_dir, har_file or args.har_file)
-    output_dir = resolve_inside_data_dir(data_dir, args.output_folder).resolve()
-    sidecar_dir = resolve_inside_data_dir(data_dir, args.sidecar_folder).resolve()
-    state_file = resolve_inside_data_dir(data_dir, args.state_file).resolve()
-    manifest_file = resolve_inside_data_dir(data_dir, DEFAULT_MANIFEST_FILE).resolve()
-    media_dump_file = resolve_inside_data_dir(
+    return RuntimePaths(
         data_dir,
-        DEFAULT_MEDIA_RESPONSES_FILE,
-    ).resolve()
+        resolve_har_file(data_dir, har_file or args.har_file),
+        resolve_inside_data_dir(data_dir, args.output_folder).resolve(),
+        resolve_inside_data_dir(data_dir, args.sidecar_folder).resolve(),
+        resolve_inside_data_dir(data_dir, args.state_file).resolve(),
+        resolve_inside_data_dir(data_dir, DEFAULT_MANIFEST_FILE).resolve(),
+        resolve_inside_data_dir(data_dir, DEFAULT_MEDIA_RESPONSES_FILE).resolve(),
+    )
+
+
+def runtime_cache_key(paths: RuntimePaths) -> tuple[str, float, str, float, str, float]:
     return (
-        data_dir,
-        har_path,
-        output_dir,
-        sidecar_dir,
-        state_file,
-        manifest_file,
-        media_dump_file,
+        str(paths.har_path),
+        paths.har_path.stat().st_mtime,
+        str(paths.state_file),
+        paths.state_file.stat().st_mtime if paths.state_file.exists() else 0,
+        str(paths.output_dir),
+        paths.output_dir.stat().st_mtime if paths.output_dir.exists() else 0,
     )
 
 
@@ -75,17 +97,15 @@ def prepare_manifest_state(
     write_manifest(manifest, manifest_file, har_path)
     write_media_responses_dump(manifest, media_dump_file, har_path)
 
+    create_or_update_state(state_file, manifest)
+    state, sync_changes = sync_state_with_downloads(state_file, output_dir)
     if progress:
-        progress.log_background(format_extension_summary(manifest))
+        progress.log_background(format_manifest_state_summary(manifest, state))
         for duplicate in manifest.duplicates:
             progress.log_background(
                 "Skipped duplicate media entry: "
                 f"{duplicate.filename} ({duplicate.media_id})"
             )
-
-    create_or_update_state(state_file, manifest)
-    state, sync_changes = sync_state_with_downloads(state_file, output_dir)
-    if progress:
         for change in sync_changes:
             progress.log_background(
                 "Resume sync: "
@@ -95,105 +115,107 @@ def prepare_manifest_state(
     return manifest, state, sync_changes
 
 
+def prepare_runtime_manifest_state(
+    args: argparse.Namespace,
+    har_file: str | None = None,
+    progress: ProgressState | None = None,
+) -> PreparedManifestState:
+    paths = get_runtime_paths(args, har_file)
+    return prepare_paths_manifest_state(paths, progress)
+
+
+def prepare_paths_manifest_state(
+    paths: RuntimePaths,
+    progress: ProgressState | None = None,
+) -> PreparedManifestState:
+    manifest, state, sync_changes = prepare_manifest_state(
+        paths.har_path,
+        paths.output_dir,
+        paths.state_file,
+        paths.manifest_file,
+        paths.media_dump_file,
+        progress,
+    )
+    return PreparedManifestState(paths, manifest, state, sync_changes)
+
+
+def format_manifest_state_summary(manifest: MediaManifest, state: dict) -> str:
+    return "\n".join(
+        [
+            format_extension_summary(manifest),
+            format_downloaded_extension_summary(state),
+        ]
+    )
+
+
 def startup_media_summaries(args: argparse.Namespace) -> list[str]:
     try:
-        (
-            _data_dir,
-            har_path,
-            output_dir,
-            _sidecar_dir,
-            state_file,
-            manifest_file,
-            media_dump_file,
-        ) = get_runtime_paths(args)
-        manifest, state, _sync_changes = prepare_manifest_state(
-            har_path,
-            output_dir,
-            state_file,
-            manifest_file,
-            media_dump_file,
-        )
+        prepared = prepare_runtime_manifest_state(args)
     except Exception:
         return []
-    return [
-        format_extension_summary(manifest),
-        format_downloaded_extension_summary(state),
-    ]
+    return [format_manifest_state_summary(prepared.manifest, prepared.state)]
 
 
 def run_once(args: argparse.Namespace) -> int:
-    (
-        data_dir,
-        har_path,
-        output_dir,
-        sidecar_dir,
-        state_file,
-        manifest_file,
-        media_dump_file,
-    ) = get_runtime_paths(args)
-    log_file = configure_file_logging(data_dir)
+    prepared = prepare_runtime_manifest_state(args)
+    paths = prepared.paths
+    log_file = configure_file_logging(paths.data_dir)
 
     print("========================================", flush=True)
     print("             GoSync Utility             ", flush=True)
     print("========================================", flush=True)
-    print(f"Data directory: {data_dir}", flush=True)
-    print(f"HAR file: {har_path}", flush=True)
-    print(f"Output folder: {output_dir}", flush=True)
-    print(f"Sidecars: next to media files in {output_dir}", flush=True)
-    print(f"State file: {state_file}", flush=True)
+    print(f"Data directory: {paths.data_dir}", flush=True)
+    print(f"HAR file: {paths.har_path}", flush=True)
+    print(f"Output folder: {paths.output_dir}", flush=True)
+    print(f"Sidecars: next to media files in {paths.output_dir}", flush=True)
+    print(f"State file: {paths.state_file}", flush=True)
     print(f"Batch max bytes: {args.batch_max_bytes}", flush=True)
     LOGGER.info("File logging enabled at %s", log_file)
     LOGGER.info(
         "Starting run-once download. data_dir=%s har_file=%s output_dir=%s "
         "state_file=%s batch_max_bytes=%s",
-        data_dir,
-        har_path,
-        output_dir,
-        state_file,
+        paths.data_dir,
+        paths.har_path,
+        paths.output_dir,
+        paths.state_file,
         args.batch_max_bytes,
     )
 
-    manifest, state, sync_changes = prepare_manifest_state(
-        har_path,
-        output_dir,
-        state_file,
-        manifest_file,
-        media_dump_file,
-    )
-    print(format_extension_summary(manifest), flush=True)
-    print(format_downloaded_extension_summary(state), flush=True)
-    headers = extract_browser_headers(har_path)
+    manifest = prepared.manifest
+    print(format_extension_summary(prepared.manifest), flush=True)
+    print(format_downloaded_extension_summary(prepared.state), flush=True)
+    headers = extract_browser_headers(paths.har_path)
     try:
         run_sidecar_job(
-            har_path,
-            output_dir,
+            paths.har_path,
+            paths.output_dir,
             media_items=manifest.media,
-            state_file=state_file,
+            state_file=paths.state_file,
         )
     except Exception:
         LOGGER.exception("Sidecar generation failed; continuing download.")
     process_pipeline(
         media_items=manifest.media,
-        data_dir=data_dir,
-        output_dir=output_dir,
-        state_file=state_file,
+        data_dir=paths.data_dir,
+        output_dir=paths.output_dir,
+        state_file=paths.state_file,
         headers=headers,
         batch_max_bytes=args.batch_max_bytes,
     )
-    final_state = load_state(state_file)
+    final_state = load_state(paths.state_file)
     report_path = write_run_report(
-        data_dir,
+        paths.data_dir,
         final_state,
         manifest,
         STATUS_COMPLETE,
-        sync_changes,
+        prepared.sync_changes,
     )
     print(
         build_run_summary(
             final_state,
             manifest,
             STATUS_COMPLETE,
-            sync_changes,
+            prepared.sync_changes,
             report_path,
         ),
         flush=True,
@@ -214,15 +236,9 @@ def run_download_job(
     state_file: Path | None = None
     try:
         job_id = uuid4().hex
-        (
-            data_dir,
-            har_path,
-            output_dir,
-            sidecar_dir,
-            state_file,
-            manifest_file,
-            media_dump_file,
-        ) = get_runtime_paths(args, har_file)
+        paths = get_runtime_paths(args, har_file)
+        data_dir = paths.data_dir
+        state_file = paths.state_file
         progress.update(
             status="running",
             state_label="Processing",
@@ -245,34 +261,30 @@ def run_download_job(
             current_download_started_at=0,
             current_download_speed_bps=0,
             current_download_elapsed_seconds=0,
-            output_dir=str(output_dir),
-            sidecar_dir=str(output_dir),
-            har_file=str(har_path),
+            output_dir=str(paths.output_dir),
+            sidecar_dir=str(paths.output_dir),
+            har_file=str(paths.har_path),
         )
-        progress.log(f"Scanning HAR file: {har_path.name}")
-        manifest, state, sync_changes = prepare_manifest_state(
-            har_path,
-            output_dir,
-            state_file,
-            manifest_file,
-            media_dump_file,
-            progress,
-        )
+        progress.log(f"Scanning HAR file: {paths.har_path.name}")
+        prepared = prepare_paths_manifest_state(paths)
+        manifest = prepared.manifest
+        state = prepared.state
+        sync_changes = prepared.sync_changes
         progress.update(
             total_ids=len(manifest.media),
             completed_ids=completed_count(state),
             pending_ids=max(len(manifest.media) - completed_count(state), 0),
             sidecar_status="pending",
             sidecar_count=0,
-            sidecar_dir=str(output_dir),
+            sidecar_dir=str(paths.output_dir),
             sidecar_message="XMP sidecar generation queued.",
         )
-        headers = extract_browser_headers(har_path)
+        headers = extract_browser_headers(paths.har_path)
         process_pipeline(
             media_items=manifest.media,
-            data_dir=data_dir,
-            output_dir=output_dir,
-            state_file=state_file,
+            data_dir=paths.data_dir,
+            output_dir=paths.output_dir,
+            state_file=paths.state_file,
             headers=headers,
             batch_max_bytes=args.batch_max_bytes,
             progress=progress,

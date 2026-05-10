@@ -6,7 +6,7 @@ from typing import Any
 
 from gosync.constants import STATUS_DOWNLOADED, STATUS_FAILED, STATUS_PENDING
 from gosync.manifest import MediaManifest
-from gosync.paths import media_download_path
+from gosync.paths import media_download_path, safe_child_path
 
 STATE_VERSION = 1
 
@@ -97,8 +97,30 @@ def downloaded_filename_index(output_dir: Path) -> set[str]:
     return {
         path.name.casefold()
         for path in output_dir.rglob("*")
-        if path.is_file() and path.suffix.casefold() != ".xmp"
+        if safe_child_path(output_dir, path)
+        and path.is_file()
+        and path.suffix.casefold() != ".xmp"
     }
+
+
+def _is_safe_child_path(base_dir: Path, candidate: Path) -> bool:
+    return safe_child_path(base_dir, candidate)
+
+
+def media_file_exists(
+    output_dir: Path,
+    filename: str,
+    existing_filenames: set[str] | None = None,
+) -> bool:
+    if existing_filenames is None:
+        existing_filenames = downloaded_filename_index(output_dir)
+    media_path = media_download_path(output_dir, filename)
+    legacy_path = output_dir / filename
+    return (
+        (_is_safe_child_path(output_dir, media_path) and media_path.is_file())
+        or (_is_safe_child_path(output_dir, legacy_path) and legacy_path.is_file())
+        or filename.casefold() in existing_filenames
+    )
 
 
 def sync_state_with_downloads(
@@ -120,11 +142,7 @@ def sync_state_with_downloads(
         if not filename:
             continue
 
-        exists = (
-            media_download_path(output_dir, filename).is_file()
-            or (output_dir / filename).is_file()
-            or filename.casefold() in existing_filenames
-        )
+        exists = media_file_exists(output_dir, filename, existing_filenames)
         current_status = str(record.get("download_status") or STATUS_PENDING)
         if exists and current_status != STATUS_DOWNLOADED:
             record["download_status"] = STATUS_DOWNLOADED

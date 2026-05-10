@@ -111,7 +111,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_inside_data_dir(data_dir: Path, value: str) -> Path:
+    data_dir = data_dir.resolve()
     path = Path(value)
-    if path.is_absolute():
-        return path
-    return data_dir / path
+    candidate = path if path.is_absolute() else data_dir / path
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(data_dir)
+    except ValueError as exc:
+        raise ValueError(f"Path must be inside data directory: {data_dir}") from exc
+    return candidate

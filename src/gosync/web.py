@@ -10,23 +10,23 @@ from gosync import __version__
 from gosync.config import ACCESS_LOGS, IS_PROD, resolve_inside_data_dir
 from gosync.constants import STATUS_DOWNLOADED
 from gosync.logging_config import LOGGER, configure_file_logging
-from gosync.manifest import (
-    format_extension_summary,
-    read_manifest_from_har,
-    write_manifest,
-    write_media_responses_dump,
-)
-from gosync.paths import media_download_path, sidecar_output_path
+from gosync.paths import safe_child_path, sidecar_output_path
 from gosync.progress import ProgressState
-from gosync.runtime import get_runtime_paths, run_download_job
+from gosync.runtime import (
+    format_manifest_state_summary,
+    get_runtime_paths,
+    prepare_paths_manifest_state,
+    prepare_runtime_manifest_state,
+    run_download_job,
+    runtime_cache_key,
+)
 from gosync.sidecar import run_sidecar_job
 from gosync.state import (
     completed_count as state_completed_count,
 )
 from gosync.state import (
-    create_or_update_state,
     downloaded_filename_index,
-    sync_state_with_downloads,
+    media_file_exists,
 )
 
 PROGRESS = ProgressState()
@@ -86,33 +86,21 @@ def create_app(args: argparse.Namespace) -> Flask:
             return
 
         try:
-            (
-                _data_path,
-                har_path,
-                output_dir,
-                _sidecar_dir,
-                state_file,
-                manifest_file,
-                media_dump_file,
-            ) = get_runtime_paths(args, current_har)
-            cache_key = (
-                str(har_path),
-                har_path.stat().st_mtime,
-                str(state_file),
-                state_file.stat().st_mtime if state_file.exists() else 0,
-                str(output_dir),
-                output_dir.stat().st_mtime if output_dir.exists() else 0,
-            )
+            paths = get_runtime_paths(args, current_har)
+            cache_key = runtime_cache_key(paths)
+            summary = None
 
             if RESUME_CACHE.get("key") == cache_key:
                 total_ids = int(RESUME_CACHE["total_ids"])
                 completed_count = int(RESUME_CACHE["completed_ids"])
             else:
-                manifest = read_manifest_from_har(har_path)
-                write_manifest(manifest, manifest_file, har_path)
-                write_media_responses_dump(manifest, media_dump_file, har_path)
-                create_or_update_state(state_file, manifest)
-                state, _changes = sync_state_with_downloads(state_file, output_dir)
+                prepared = prepare_paths_manifest_state(paths)
+                summary = format_manifest_state_summary(
+                    prepared.manifest,
+                    prepared.state,
+                )
+                manifest = prepared.manifest
+                state = prepared.state
                 total_ids = len(manifest.media)
                 completed_count = state_completed_count(state)
                 RESUME_CACHE.update(
@@ -121,17 +109,22 @@ def create_app(args: argparse.Namespace) -> Flask:
                     completed_ids=completed_count,
                 )
 
-            summary_key = (str(har_path), har_path.stat().st_mtime)
+            summary_key = cache_key
             if RESUME_CACHE.get("summary_key") != summary_key:
-                manifest = read_manifest_from_har(har_path)
-                PROGRESS.log_background(format_extension_summary(manifest))
+                if summary is None:
+                    prepared = prepare_paths_manifest_state(paths)
+                    summary = format_manifest_state_summary(
+                        prepared.manifest,
+                        prepared.state,
+                    )
+                PROGRESS.log_background(summary)
                 RESUME_CACHE["summary_key"] = summary_key
 
             PROGRESS.update(
                 total_ids=total_ids,
                 completed_ids=completed_count,
                 pending_ids=max(total_ids - completed_count, 0),
-                har_file=str(har_path),
+                har_file=str(paths.har_path),
             )
         except Exception:
             return
@@ -143,33 +136,15 @@ def create_app(args: argparse.Namespace) -> Flask:
 
         if current_har:
             try:
-                (
-                    _data_path,
-                    har_path,
-                    output_dir,
-                    _sidecar_dir,
-                    state_file,
-                    manifest_file,
-                    media_dump_file,
-                ) = get_runtime_paths(args, current_har)
-                cache_key = (
-                    str(har_path),
-                    har_path.stat().st_mtime,
-                    str(state_file),
-                    state_file.stat().st_mtime if state_file.exists() else 0,
-                    str(output_dir),
-                    output_dir.stat().st_mtime if output_dir.exists() else 0,
-                )
+                paths = get_runtime_paths(args, current_har)
+                output_dir = paths.output_dir
+                cache_key = runtime_cache_key(paths)
 
                 if MEDIA_ID_CACHE.get("key") == cache_key:
                     state_records = list(MEDIA_ID_CACHE["state_records"])
                 else:
-                    manifest = read_manifest_from_har(har_path)
-                    write_manifest(manifest, manifest_file, har_path)
-                    write_media_responses_dump(manifest, media_dump_file, har_path)
-                    create_or_update_state(state_file, manifest)
-                    state, _changes = sync_state_with_downloads(state_file, output_dir)
-                    media = state.get("media", {})
+                    prepared = prepare_paths_manifest_state(paths)
+                    media = prepared.state.get("media", {})
                     state_records = (
                         list(media.values()) if isinstance(media, dict) else []
                     )
@@ -201,6 +176,9 @@ def create_app(args: argparse.Namespace) -> Flask:
                 filename,
                 sidecar_filename,
             )
+            sidecar_path_exists = (
+                safe_child_path(output_dir, sidecar_path) and sidecar_path.is_file()
+            )
             fallback_sidecar_path = sidecar_files.get(sidecar_stem)
             status = (
                 "downloading"
@@ -208,9 +186,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                 else (
                     "downloaded"
                     if record.get("download_status") == STATUS_DOWNLOADED
-                    or media_download_path(output_dir, filename).is_file()
-                    or (output_dir / filename).is_file()
-                    or filename.casefold() in existing_filenames
+                    or media_file_exists(output_dir, filename, existing_filenames)
                     else "pending"
                 )
             )
@@ -219,7 +195,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                     "filename": filename,
                     "sidecar_filename": (
                         sidecar_path.name
-                        if sidecar_path.is_file()
+                        if sidecar_path_exists
                         else (
                             fallback_sidecar_path.name
                             if fallback_sidecar_path
@@ -258,21 +234,10 @@ def create_app(args: argparse.Namespace) -> Flask:
         args.har_file = filename
         PROGRESS.log_event(f"Uploaded HAR file: {filename}", state_label="Uploaded")
         try:
-            (
-                _data_path,
-                har_path,
-                output_dir,
-                _sidecar_dir,
-                state_file,
-                manifest_file,
-                media_dump_file,
-            ) = get_runtime_paths(args, filename)
-            manifest = read_manifest_from_har(har_path)
-            write_manifest(manifest, manifest_file, har_path)
-            write_media_responses_dump(manifest, media_dump_file, har_path)
-            create_or_update_state(state_file, manifest)
-            sync_state_with_downloads(state_file, output_dir)
-            PROGRESS.log_background(format_extension_summary(manifest))
+            prepared = prepare_runtime_manifest_state(args, filename)
+            PROGRESS.log_background(
+                format_manifest_state_summary(prepared.manifest, prepared.state)
+            )
         except Exception as exc:
             LOGGER.warning(
                 "Failed to summarize uploaded HAR file %s: %s",
@@ -298,25 +263,13 @@ def create_app(args: argparse.Namespace) -> Flask:
                 PROGRESS.log("No HAR file selected.")
                 return redirect(url_for("index"))
 
-            (
-                _data_path,
-                har_path,
-                output_dir,
-                sidecar_dir,
-                state_file,
-                manifest_file,
-                media_dump_file,
-            ) = get_runtime_paths(args, selected_har)
-            manifest = read_manifest_from_har(har_path)
-            write_manifest(manifest, manifest_file, har_path)
-            write_media_responses_dump(manifest, media_dump_file, har_path)
-            create_or_update_state(state_file, manifest)
-            sync_state_with_downloads(state_file, output_dir)
+            prepared = prepare_runtime_manifest_state(args, selected_har)
+            paths = prepared.paths
             PROGRESS.update(
                 notifications=[],
                 sidecar_status="pending",
                 sidecar_count=0,
-                sidecar_dir=str(output_dir),
+                sidecar_dir=str(paths.output_dir),
                 sidecar_message="XMP sidecar generation queued.",
             )
 
@@ -327,7 +280,13 @@ def create_app(args: argparse.Namespace) -> Flask:
             )
             SIDECAR_THREAD = threading.Thread(
                 target=run_sidecar_job,
-                args=(har_path, output_dir, PROGRESS, manifest.media, state_file),
+                args=(
+                    paths.har_path,
+                    paths.output_dir,
+                    PROGRESS,
+                    prepared.manifest.media,
+                    paths.state_file,
+                ),
                 daemon=True,
             )
             SIDECAR_THREAD.start()
@@ -356,4 +315,5 @@ def create_app(args: argparse.Namespace) -> Flask:
     def sidecars():
         return jsonify({"items": media_sidecar_rows()})
 
+    refresh_resume_counts()
     return app

@@ -20,7 +20,7 @@ from gosync.constants import (
     ZIP_URL_PREFIX,
 )
 from gosync.manifest import MediaItem
-from gosync.paths import media_download_path
+from gosync.paths import media_download_path, safe_child_path
 from gosync.progress import ProgressState
 from gosync.state import (
     completed_count as state_completed_count,
@@ -84,10 +84,18 @@ class DownloadCancelled(Exception):
 
 
 def resolve_har_file(data_dir: Path, har_file: str | None) -> Path:
+    data_dir = data_dir.resolve()
     if har_file:
         candidate = Path(har_file)
         if not candidate.is_absolute():
             candidate = data_dir / candidate
+        candidate = candidate.resolve()
+        try:
+            candidate.relative_to(data_dir)
+        except ValueError as exc:
+            raise FileNotFoundError(
+                f"HAR file must be inside data directory: {data_dir}"
+            ) from exc
         if candidate.exists():
             return candidate
         raise FileNotFoundError(f"Could not find HAR file: {candidate}")
@@ -261,12 +269,16 @@ def safe_extract(zip_ref: zipfile.ZipFile, output_dir: Path) -> None:
 def organize_extracted_media(output_dir: Path, media_items: list[MediaItem]) -> None:
     for item in media_items:
         target_path = media_download_path(output_dir, item.filename)
+        if not safe_child_path(output_dir, target_path):
+            raise ValueError(f"Unsafe media path: {item.filename}")
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         if target_path.exists():
             continue
 
         source_path = output_dir / item.filename
+        if not safe_child_path(output_dir, source_path):
+            continue
         if source_path.exists():
             source_path.replace(target_path)
 

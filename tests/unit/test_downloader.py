@@ -9,6 +9,7 @@ from gosync.downloader import (
     format_size_mib,
     organize_extracted_media,
     parse_batch_max_bytes,
+    resolve_har_file,
     safe_extract,
 )
 from gosync.paths import media_download_path
@@ -94,6 +95,39 @@ def test_format_media_size_uses_binary_units(make_media_item) -> None:
     assert format_size_mib(None) == "unknown size"
 
 
+def test_resolve_har_file_rejects_parent_directory_traversal(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    outside_har = tmp_path / "outside.har"
+    outside_har.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="inside data directory"):
+        resolve_har_file(data_dir, "../outside.har")
+
+
+def test_resolve_har_file_rejects_absolute_paths_outside_data_dir(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    outside_har = tmp_path / "outside.har"
+    outside_har.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="inside data directory"):
+        resolve_har_file(data_dir, str(outside_har))
+
+
+def test_resolve_har_file_allows_paths_inside_data_dir(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    har_path = data_dir / "inside.har"
+    har_path.write_text("{}", encoding="utf-8")
+
+    assert resolve_har_file(data_dir, "inside.har") == har_path.resolve()
+
+
 def test_organize_extracted_media_moves_files_into_extension_dirs(
     tmp_path: Path,
     make_media_item,
@@ -126,6 +160,22 @@ def test_organize_extracted_media_keeps_existing_target(
 
     assert target.read_text(encoding="utf-8") == "already done"
     assert (output_dir / "large.MP4").read_text(encoding="utf-8") == "new media"
+
+
+def test_organize_extracted_media_ignores_source_paths_outside_output_dir(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    item = make_media_item("A", "../outside.MP4", 10)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    outside_path = tmp_path / "outside.MP4"
+    outside_path.write_text("outside", encoding="utf-8")
+
+    organize_extracted_media(output_dir, [item])
+
+    assert outside_path.read_text(encoding="utf-8") == "outside"
+    assert not media_download_path(output_dir, item.filename).exists()
 
 
 def test_safe_extract_rejects_zip_slip_paths(tmp_path: Path) -> None:
