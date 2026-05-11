@@ -112,6 +112,10 @@ def is_media_file(item: Any) -> bool:
     if not filename or not extension:
         return False
 
+    # Skip JSON files
+    if extension.lower() == "json":
+        return False
+
     content_type = str(item.get("content_type", "")).lower()
     item_type = str(item.get("type", "")).lower()
     non_media_types = {
@@ -256,6 +260,9 @@ def read_manifest_from_har(har_path: Path) -> MediaManifest:
                 unnamed_count + 1,
             )
             if not media_item:
+                continue
+            # Skip JSON files at manifest creation level
+            if media_item.filename.lower().endswith('.json'):
                 continue
             if generated_filename:
                 unnamed_count += 1

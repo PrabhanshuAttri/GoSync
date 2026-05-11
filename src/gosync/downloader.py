@@ -68,6 +68,9 @@ def format_size_mib(size_bytes: int | None) -> str:
 
 
 def format_media_for_log(item: MediaItem) -> str:
+    # Skip JSON files in log messages
+    if item.filename.lower().endswith('.json'):
+        return f"{item.filename} ({item.media_id}, {format_size_mib(item.file_size)}) [SKIPPED]"
     return f"{item.filename} ({item.media_id}, {format_size_mib(item.file_size)})"
 
 
@@ -372,17 +375,17 @@ def process_pipeline(
     batch_cap_media_items: list[MediaItem] | None = None,
     job_id: str | None = None,
 ) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    temp_zip = data_dir / DEFAULT_TEMP_ZIP
-    session = create_session()
 
+    # Filter out JSON files
+    filtered_media_items = [item for item in media_items if not item.filename.lower().endswith('.json')]
+    
     state_keys = pending_keys(mark_downloaded(state_file, []))
-    pending_items = [item for item in media_items if item.key in state_keys]
-    completed_count = len(media_items) - len(pending_items)
+    pending_items = [item for item in filtered_media_items if item.key in state_keys]
+    completed_count = len(filtered_media_items) - len(pending_items)
     if progress:
         progress.update(
             job_id_guard=job_id,
-            total_ids=len(media_items),
+            total_ids=len(filtered_media_items),
             completed_ids=completed_count,
             pending_ids=len(pending_items),
             output_dir=str(output_dir),
@@ -390,14 +393,14 @@ def process_pipeline(
         )
 
     if not pending_items:
-        message = f"All {len(media_items)} media files have already been downloaded."
+        message = f"All {len(filtered_media_items)} media files have already been downloaded."
         if progress:
             progress.log(message, job_id_guard=job_id)
         else:
             print(f"\n{message}", flush=True)
         return
 
-    batch_cap_items = batch_cap_media_items or media_items
+    batch_cap_items = batch_cap_media_items or filtered_media_items
     batch_cap = parse_batch_max_bytes(batch_max_bytes, batch_cap_items)
     file_limit = parse_batch_file_limit(batch_file_limit)
     pending_batches = deque(
