@@ -77,7 +77,7 @@ def create_app(args: argparse.Namespace) -> Flask:
             current_har = har_files[0]
         return current_har
 
-    def refresh_resume_counts() -> None:
+    def refresh_resume_counts(log_summary: bool = False) -> None:
         if PROGRESS.status == "running":
             return
 
@@ -110,7 +110,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                 )
 
             summary_key = cache_key
-            if RESUME_CACHE.get("summary_key") != summary_key:
+            if log_summary and RESUME_CACHE.get("summary_key") != summary_key:
                 if summary is None:
                     prepared = prepare_paths_manifest_state(paths)
                     summary = format_manifest_state_summary(
@@ -192,6 +192,7 @@ def create_app(args: argparse.Namespace) -> Flask:
             )
             rows.append(
                 {
+                    "key": str(record.get("key") or ""),
                     "filename": filename,
                     "sidecar_filename": (
                         sidecar_path.name
@@ -202,10 +203,23 @@ def create_app(args: argparse.Namespace) -> Flask:
                             else sidecar_filename
                         )
                     ),
+                    "file_size": record.get("file_size"),
                     "status": status,
                 }
             )
         return rows
+
+    def parse_files_per_batch() -> int | None:
+        raw_value = (request.form.get("files_per_batch") or "").strip()
+        if not raw_value:
+            return None
+        try:
+            value = int(raw_value)
+        except ValueError as exc:
+            raise ValueError("Files per batch must be a positive number.") from exc
+        if value < 1:
+            raise ValueError("Files per batch must be at least 1.")
+        return value
 
     @app.get("/")
     def index():
@@ -234,10 +248,7 @@ def create_app(args: argparse.Namespace) -> Flask:
         args.har_file = filename
         PROGRESS.log_event(f"Uploaded HAR file: {filename}", state_label="Uploaded")
         try:
-            prepared = prepare_runtime_manifest_state(args, filename)
-            PROGRESS.log_background(
-                format_manifest_state_summary(prepared.manifest, prepared.state)
-            )
+            prepare_runtime_manifest_state(args, filename)
         except Exception as exc:
             LOGGER.warning(
                 "Failed to summarize uploaded HAR file %s: %s",
@@ -264,7 +275,35 @@ def create_app(args: argparse.Namespace) -> Flask:
                 return redirect(url_for("index"))
 
             prepared = prepare_runtime_manifest_state(args, selected_har)
+            selected_keys = {
+                value
+                for value in request.form.getlist("selected_media_keys")
+                if value
+            }
+            valid_keys = {item.key for item in prepared.manifest.media}
+            invalid_keys = selected_keys - valid_keys
+            if invalid_keys:
+                PROGRESS.log_event(
+                    "Selected media no longer matches the HAR. Refresh and try again.",
+                    "Ready",
+                )
+                return redirect(url_for("index"))
+            if not selected_keys:
+                PROGRESS.log_event(
+                    "Select at least one pending media file before starting.",
+                    "Ready",
+                )
+                return redirect(url_for("index"))
+            try:
+                files_per_batch = parse_files_per_batch()
+            except ValueError as exc:
+                PROGRESS.log_event(str(exc), "Ready")
+                return redirect(url_for("index"))
+
             paths = prepared.paths
+            selected_media = [
+                item for item in prepared.manifest.media if item.key in selected_keys
+            ]
             PROGRESS.update(
                 notifications=[],
                 sidecar_status="pending",
@@ -275,7 +314,7 @@ def create_app(args: argparse.Namespace) -> Flask:
 
             JOB_THREAD = threading.Thread(
                 target=run_download_job,
-                args=(args, PROGRESS, selected_har),
+                args=(args, PROGRESS, selected_har, selected_keys, files_per_batch),
                 daemon=True,
             )
             SIDECAR_THREAD = threading.Thread(
@@ -284,7 +323,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                     paths.har_path,
                     paths.output_dir,
                     PROGRESS,
-                    prepared.manifest.media,
+                    selected_media,
                     paths.state_file,
                 ),
                 daemon=True,
@@ -315,5 +354,5 @@ def create_app(args: argparse.Namespace) -> Flask:
     def sidecars():
         return jsonify({"items": media_sidecar_rows()})
 
-    refresh_resume_counts()
+    refresh_resume_counts(log_summary=True)
     return app

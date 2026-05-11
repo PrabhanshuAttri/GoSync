@@ -86,12 +86,15 @@
             <h2>Download Job</h2>
             <span class="hint">One active job</span>
           </div>
-          <form action="/start" method="post">
+          <form id="start-form" action="/start" method="post">
             <select name="har_file">
               {% for file in har_files %}
               <option value="{{ file }}" {% if file == har_file %}selected{% endif %}>{{ file }}</option>
               {% endfor %}
             </select>
+            <label class="field-label" for="files-per-batch">Files per batch</label>
+            <input id="files-per-batch" name="files_per_batch" type="number" min="1" step="1" placeholder="Auto">
+            <span class="selection-summary" id="selection-summary">No files selected</span>
             <button id="start-button" class="secondary" type="submit" {% if not har_files %}disabled{% endif %}>Start Download</button>
           </form>
           <form action="/stop" method="post" class="stop-form">
@@ -204,14 +207,28 @@
             <table class="sidecar-table">
               <thead>
                 <tr>
+                  <th class="select-column">
+                    <input id="select-visible" type="checkbox" aria-label="Select visible pending files">
+                  </th>
                   <th>Filename</th>
                   <th>Sidecar Filename</th>
-                  <th>Status</th>
+                  <th>
+                    <button class="sort-button" type="button" data-sort-key="size" aria-label="Sort by size">
+                      <span>Size</span>
+                      <span class="sort-indicator" id="size-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="sort-button active" type="button" data-sort-key="status" aria-label="Sort by status">
+                      <span>Status</span>
+                      <span class="sort-indicator asc" id="status-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody id="sidecar-table-body">
                 <tr>
-                  <td colspan="3" class="empty-cell">No media found.</td>
+                  <td colspan="5" class="empty-cell">No media found.</td>
                 </tr>
               </tbody>
             </table>
@@ -355,7 +372,45 @@
       }, notification.level === "error" ? 8000 : 5000);
     };
     let sidecarItems = [];
+    const mediaSettingsKey = "gosync-media-table-settings";
     const extensionFilter = document.getElementById("extension-filter");
+    const selectVisible = document.getElementById("select-visible");
+    const selectionSummary = document.getElementById("selection-summary");
+    const filesPerBatchInput = document.getElementById("files-per-batch");
+    const sortButtons = Array.from(document.querySelectorAll(".sort-button"));
+    const readMediaSettings = () => {
+      try {
+        return JSON.parse(sessionStorage.getItem(mediaSettingsKey) || "{}");
+      } catch {
+        return {};
+      }
+    };
+    const restoredMediaSettings = readMediaSettings();
+    let selectedMediaKeys = Array.isArray(restoredMediaSettings.selectedKeys)
+      ? new Set(restoredMediaSettings.selectedKeys)
+      : null;
+    let mediaSort = {
+      key: ["size", "status"].includes(restoredMediaSettings.sortKey)
+        ? restoredMediaSettings.sortKey
+        : "status",
+      direction: ["asc", "desc"].includes(restoredMediaSettings.sortDirection)
+        ? restoredMediaSettings.sortDirection
+        : "asc",
+    };
+    if (restoredMediaSettings.filesPerBatch) {
+      filesPerBatchInput.value = restoredMediaSettings.filesPerBatch;
+    }
+    const saveMediaSettings = () => {
+      sessionStorage.setItem(
+        mediaSettingsKey,
+        JSON.stringify({
+          selectedKeys: selectedMediaKeys ? Array.from(selectedMediaKeys) : null,
+          sortKey: mediaSort.key,
+          sortDirection: mediaSort.direction,
+          filesPerBatch: filesPerBatchInput.value || "",
+        })
+      );
+    };
     const mediaExtension = (filename) => {
       const base = String(filename || "").split(/[\\/]/).pop();
       const index = base.lastIndexOf(".");
@@ -385,56 +440,178 @@
       extensionFilter.value = extensions.includes(selected) ? selected : "";
       extensionFilter.disabled = extensions.length < 2;
     };
+    const formatFileSize = (value) => {
+      const bytes = Number(value);
+      if (!Number.isFinite(bytes) || bytes <= 0) return "Unknown";
+      return formatBytes(bytes);
+    };
+    const statusRank = (status) => {
+      if (status === "downloading") return 0;
+      if (status === "downloaded") return 1;
+      return 2;
+    };
+    const fileSizeValue = (item) => {
+      const bytes = Number(item.file_size);
+      return Number.isFinite(bytes) && bytes > 0 ? bytes : -1;
+    };
+    const compareMediaItems = (a, b) => {
+      let result = 0;
+      if (mediaSort.key === "size") {
+        const aSize = fileSizeValue(a);
+        const bSize = fileSizeValue(b);
+        if (aSize < 0 && bSize >= 0) result = 1;
+        else if (aSize >= 0 && bSize < 0) result = -1;
+        else result = (aSize - bSize) * (mediaSort.direction === "asc" ? 1 : -1);
+      } else {
+        result = (
+          statusRank(a.status) - statusRank(b.status)
+        ) * (mediaSort.direction === "asc" ? 1 : -1);
+      }
+      return result
+        || String(a.filename || "").localeCompare(String(b.filename || ""));
+    };
+    const syncSortButtons = () => {
+      sortButtons.forEach((button) => {
+        const active = button.dataset.sortKey === mediaSort.key;
+        const indicator = button.querySelector(".sort-indicator");
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-sort", active ? mediaSort.direction : "none");
+        indicator.classList.toggle("asc", active && mediaSort.direction === "asc");
+        indicator.classList.toggle("desc", active && mediaSort.direction === "desc");
+      });
+    };
+    sortButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const key = button.dataset.sortKey;
+        if (mediaSort.key === key) {
+          mediaSort.direction = mediaSort.direction === "asc" ? "desc" : "asc";
+        } else {
+          mediaSort = { key, direction: "desc" };
+        }
+        syncSortButtons();
+        saveMediaSettings();
+        renderSidecarTable();
+      });
+    });
+    syncSortButtons();
     const renderSidecarTable = () => {
       const body = document.getElementById("sidecar-table-body");
       const selectedExtension = extensionFilter.value;
       const items = selectedExtension
         ? sidecarItems.filter((item) => mediaExtension(item.filename) === selectedExtension)
         : sidecarItems;
-      const sortedItems = [...items].sort((a, b) => {
-        const statusRank = (item) => {
-          if (item.status === "downloading") return 0;
-          if (item.status === "downloaded") return 1;
-          return 2;
-        };
-        return statusRank(a) - statusRank(b)
-          || String(a.filename || "").localeCompare(String(b.filename || ""));
-      });
+      const sortedItems = [...items].sort(compareMediaItems);
 
       if (!sidecarItems.length) {
-        body.innerHTML = '<tr><td colspan="3" class="empty-cell">No media found.</td></tr>';
+        body.innerHTML = '<tr><td colspan="5" class="empty-cell">No media found.</td></tr>';
         return;
       }
       if (!items.length) {
-        body.innerHTML = '<tr><td colspan="3" class="empty-cell">No media matches this filter.</td></tr>';
+        body.innerHTML = '<tr><td colspan="5" class="empty-cell">No media matches this filter.</td></tr>';
         return;
       }
 
       body.replaceChildren();
       sortedItems.forEach((item) => {
         const row = document.createElement("tr");
+        const selectCell = document.createElement("td");
+        const checkbox = document.createElement("input");
         const filename = document.createElement("td");
         const sidecar = document.createElement("td");
+        const size = document.createElement("td");
         const statusCell = document.createElement("td");
         const status = document.createElement("span");
+        const selectable = item.status !== "downloaded";
+
+        checkbox.type = "checkbox";
+        checkbox.name = "selected_media_keys";
+        checkbox.value = item.key || "";
+        checkbox.checked = selectedMediaKeys?.has(item.key) || false;
+        checkbox.disabled = !selectable || !item.key;
+        checkbox.setAttribute("form", "start-form");
+        checkbox.setAttribute("aria-label", `Select ${item.filename}`);
+        checkbox.addEventListener("change", () => {
+          if (!selectedMediaKeys) selectedMediaKeys = new Set();
+          if (checkbox.checked) {
+            selectedMediaKeys.add(item.key);
+          } else {
+            selectedMediaKeys.delete(item.key);
+          }
+          updateSelectionSummary();
+          syncSelectVisibleState();
+          saveMediaSettings();
+        });
 
         filename.textContent = item.filename;
         filename.title = item.filename;
         sidecar.textContent = item.sidecar_filename;
         sidecar.title = item.sidecar_filename;
+        size.textContent = formatFileSize(item.file_size);
+        size.title = item.file_size ? `${item.file_size} bytes` : "Unknown size";
         status.className = `table-status ${item.status}`;
         status.textContent = item.status;
 
+        selectCell.append(checkbox);
         statusCell.append(status);
-        row.append(filename, sidecar, statusCell);
+        row.append(selectCell, filename, sidecar, size, statusCell);
         body.append(row);
       });
+      syncSelectVisibleState();
+      updateSelectionSummary();
     };
+    const visibleSelectableItems = () => {
+      const selectedExtension = extensionFilter.value;
+      return sidecarItems.filter((item) => {
+        const visible = selectedExtension
+          ? mediaExtension(item.filename) === selectedExtension
+          : true;
+        return visible && item.status !== "downloaded" && item.key;
+      });
+    };
+    const updateSelectionSummary = () => {
+      const selectedCount = selectedMediaKeys ? selectedMediaKeys.size : 0;
+      const pendingCount = sidecarItems.filter((item) => item.status !== "downloaded").length;
+      selectionSummary.textContent = `${selectedCount} of ${pendingCount} pending selected`;
+    };
+    const syncSelectVisibleState = () => {
+      const visible = visibleSelectableItems();
+      const selectedVisible = visible.filter((item) => selectedMediaKeys?.has(item.key));
+      selectVisible.disabled = !visible.length;
+      selectVisible.checked = !!visible.length && selectedVisible.length === visible.length;
+      selectVisible.indeterminate = selectedVisible.length > 0 && selectedVisible.length < visible.length;
+    };
+    selectVisible.addEventListener("change", () => {
+      if (!selectedMediaKeys) selectedMediaKeys = new Set();
+      visibleSelectableItems().forEach((item) => {
+        if (selectVisible.checked) {
+          selectedMediaKeys.add(item.key);
+        } else {
+          selectedMediaKeys.delete(item.key);
+        }
+      });
+      saveMediaSettings();
+      renderSidecarTable();
+    });
+    filesPerBatchInput.addEventListener("input", saveMediaSettings);
+    document.getElementById("start-form")?.addEventListener("submit", saveMediaSettings);
     extensionFilter.addEventListener("change", renderSidecarTable);
     const refreshSidecarTable = async () => {
       const res = await fetch("/sidecars");
       const data = await res.json();
       sidecarItems = data.items || [];
+      if (selectedMediaKeys === null) {
+        selectedMediaKeys = new Set(
+          sidecarItems
+            .filter((item) => item.status !== "downloaded" && item.key)
+            .map((item) => item.key)
+        );
+      } else {
+        const validKeys = new Set(sidecarItems.map((item) => item.key).filter(Boolean));
+        selectedMediaKeys = new Set(
+          Array.from(selectedMediaKeys).filter((key) => validKeys.has(key))
+        );
+      }
+      saveMediaSettings();
       syncExtensionFilterOptions(sidecarItems);
       renderSidecarTable();
     };

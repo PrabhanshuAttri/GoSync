@@ -8,11 +8,15 @@ from gosync.downloader import (
     format_media_for_log,
     format_size_mib,
     organize_extracted_media,
+    parse_batch_file_limit,
     parse_batch_max_bytes,
+    process_pipeline,
     resolve_har_file,
     safe_extract,
 )
+from gosync.manifest import MediaManifest
 from gosync.paths import media_download_path
+from gosync.state import create_or_update_state
 
 
 def test_size_batches_use_largest_file_as_auto_cap(make_media_item) -> None:
@@ -56,6 +60,71 @@ def test_size_batches_clamp_oversized_cap_to_largest_file(make_media_item) -> No
     )
 
 
+def test_size_batches_respect_files_per_batch_limit(make_media_item) -> None:
+    items = [
+        make_media_item("A", "largest.mp4", 100),
+        make_media_item("B", "one.mp4", 30),
+        make_media_item("C", "two.mp4", 25),
+        make_media_item("D", "three.jpg", 20),
+        make_media_item("E", "four.jpg", 15),
+    ]
+
+    batches = build_size_batches(items, 100, batch_file_limit=2)
+
+    assert [[item.filename for item in batch] for batch in batches] == [
+        ["largest.mp4"],
+        ["one.mp4", "two.mp4"],
+        ["three.jpg", "four.jpg"],
+    ]
+
+
+def test_process_pipeline_uses_full_manifest_for_auto_batch_cap(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    largest = make_media_item("A", "huge.mp4", 100)
+    selected_items = [
+        make_media_item("B", "small-three.mp4", 3),
+        make_media_item("C", "small-two.mp4", 2),
+        make_media_item("D", "small-one.jpg", 1),
+    ]
+    full_manifest_items = [largest, *selected_items]
+    state_file = tmp_path / "state.json"
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=full_manifest_items,
+            duplicates=[],
+            matching_entries=1,
+            media_responses=[],
+        ),
+    )
+    downloaded_batches = []
+
+    def fake_download_batch(_session, batch, temp_zip, _headers, _progress=None):
+        downloaded_batches.append(batch)
+        with zipfile.ZipFile(temp_zip, "w"):
+            pass
+
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+    monkeypatch.setattr("gosync.downloader.organize_extracted_media", lambda *_: None)
+
+    process_pipeline(
+        media_items=selected_items,
+        data_dir=tmp_path,
+        output_dir=tmp_path / "downloads",
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+        batch_file_limit=3,
+        batch_cap_media_items=full_manifest_items,
+    )
+
+    assert downloaded_batches == [["B", "C", "D"]]
+
+
 def test_size_batches_put_unknown_size_items_in_single_item_batches(
     make_media_item,
 ) -> None:
@@ -76,6 +145,17 @@ def test_size_batches_put_unknown_size_items_in_single_item_batches(
 def test_parse_batch_max_bytes_rejects_invalid_values(value, make_media_item) -> None:
     with pytest.raises(ValueError):
         parse_batch_max_bytes(value, [make_media_item()])
+
+
+@pytest.mark.parametrize("value", ["1", 1, "12"])
+def test_parse_batch_file_limit_accepts_positive_values(value) -> None:
+    assert parse_batch_file_limit(value) == int(value)
+
+
+@pytest.mark.parametrize("value", ["0", 0, "-1", "not-a-number"])
+def test_parse_batch_file_limit_rejects_invalid_values(value) -> None:
+    with pytest.raises(ValueError):
+        parse_batch_file_limit(value)
 
 
 def test_format_media_size_uses_binary_units(make_media_item) -> None:

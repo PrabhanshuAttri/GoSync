@@ -9,6 +9,7 @@ from gosync.constants import (
     DEFAULT_MANIFEST_FILE,
     DEFAULT_MEDIA_RESPONSES_FILE,
     STATUS_COMPLETE,
+    STATUS_DOWNLOADED,
     STATUS_STOPPED,
 )
 from gosync.downloader import (
@@ -19,6 +20,7 @@ from gosync.downloader import (
 )
 from gosync.logging_config import LOGGER, configure_file_logging
 from gosync.manifest import (
+    MediaItem,
     MediaManifest,
     format_extension_summary,
     read_manifest_from_har,
@@ -29,7 +31,6 @@ from gosync.progress import ProgressState
 from gosync.report import build_run_summary, write_run_report
 from gosync.sidecar import run_sidecar_job
 from gosync.state import (
-    completed_count,
     create_or_update_state,
     format_downloaded_extension_summary,
     load_state,
@@ -148,6 +149,18 @@ def format_manifest_state_summary(manifest: MediaManifest, state: dict) -> str:
     )
 
 
+def _completed_count_for_items(state: dict, media_items: list[MediaItem]) -> int:
+    media = state.get("media", {})
+    if not isinstance(media, dict):
+        return 0
+    return sum(
+        1
+        for item in media_items
+        if isinstance(media.get(item.key), dict)
+        and media[item.key].get("download_status") == STATUS_DOWNLOADED
+    )
+
+
 def startup_media_summaries(args: argparse.Namespace) -> list[str]:
     try:
         prepared = prepare_runtime_manifest_state(args)
@@ -229,6 +242,8 @@ def run_download_job(
     args: argparse.Namespace,
     progress: ProgressState,
     har_file: str | None = None,
+    selected_keys: set[str] | None = None,
+    batch_file_limit: str | int | None = None,
 ) -> None:
     manifest: MediaManifest | None = None
     sync_changes: list[dict[str, str]] = []
@@ -268,26 +283,36 @@ def run_download_job(
         progress.log(f"Scanning HAR file: {paths.har_path.name}")
         prepared = prepare_paths_manifest_state(paths)
         manifest = prepared.manifest
+        media_items = (
+            [item for item in manifest.media if item.key in selected_keys]
+            if selected_keys is not None
+            else manifest.media
+        )
         state = prepared.state
         sync_changes = prepared.sync_changes
+        selected_completed_count = _completed_count_for_items(state, media_items)
         progress.update(
-            total_ids=len(manifest.media),
-            completed_ids=completed_count(state),
-            pending_ids=max(len(manifest.media) - completed_count(state), 0),
+            total_ids=len(media_items),
+            completed_ids=selected_completed_count,
+            pending_ids=max(len(media_items) - selected_completed_count, 0),
             sidecar_status="pending",
             sidecar_count=0,
             sidecar_dir=str(paths.output_dir),
             sidecar_message="XMP sidecar generation queued.",
         )
+        if selected_keys is not None:
+            progress.log(f"Selected {len(media_items)} media files for download.")
         headers = extract_browser_headers(paths.har_path)
         process_pipeline(
-            media_items=manifest.media,
+            media_items=media_items,
             data_dir=paths.data_dir,
             output_dir=paths.output_dir,
             state_file=paths.state_file,
             headers=headers,
             batch_max_bytes=args.batch_max_bytes,
             progress=progress,
+            batch_file_limit=batch_file_limit,
+            batch_cap_media_items=manifest.media,
         )
         final_state = load_state(state_file)
         report_path = write_run_report(

@@ -223,7 +223,12 @@ def parse_batch_max_bytes(value: str | int | None, media_items: list[MediaItem])
 def build_size_batches(
     media_items: list[MediaItem],
     batch_max_bytes: int,
+    batch_file_limit: int | None = None,
+    clamp_to_largest_file: bool = True,
 ) -> list[list[MediaItem]]:
+    if batch_file_limit is not None and batch_file_limit < 1:
+        raise ValueError("batch_file_limit must be greater than zero")
+
     unknown_size = [item for item in media_items if not item.file_size]
     known_size = sorted(
         (item for item in media_items if item.file_size),
@@ -231,7 +236,7 @@ def build_size_batches(
         reverse=True,
     )
     largest_file_size = known_size[0].file_size if known_size else 0
-    if largest_file_size:
+    if clamp_to_largest_file and largest_file_size:
         batch_max_bytes = min(batch_max_bytes, largest_file_size)
 
     batches: list[list[MediaItem]] = []
@@ -240,7 +245,10 @@ def build_size_batches(
         item_size = item.file_size or 0
         placed = False
         for index, batch_size in enumerate(batch_sizes):
-            if batch_size + item_size <= batch_max_bytes:
+            batch_has_room = (
+                batch_file_limit is None or len(batches[index]) < batch_file_limit
+            )
+            if batch_has_room and batch_size + item_size <= batch_max_bytes:
                 batches[index].append(item)
                 batch_sizes[index] += item_size
                 placed = True
@@ -253,6 +261,18 @@ def build_size_batches(
         batches.append([item])
 
     return batches
+
+
+def parse_batch_file_limit(value: str | int | None) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("files per batch must be a positive integer") from None
+    if parsed < 1:
+        raise ValueError("files per batch must be greater than zero")
+    return parsed
 
 
 def safe_extract(zip_ref: zipfile.ZipFile, output_dir: Path) -> None:
@@ -363,6 +383,8 @@ def process_pipeline(
     headers: dict[str, str],
     batch_max_bytes: str | int | None,
     progress: ProgressState | None = None,
+    batch_file_limit: str | int | None = None,
+    batch_cap_media_items: list[MediaItem] | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     temp_zip = data_dir / DEFAULT_TEMP_ZIP
@@ -387,8 +409,17 @@ def process_pipeline(
             print(f"\n{message}", flush=True)
         return
 
-    batch_cap = parse_batch_max_bytes(batch_max_bytes, media_items)
-    pending_batches = deque(build_size_batches(pending_items, batch_cap))
+    batch_cap_items = batch_cap_media_items or media_items
+    batch_cap = parse_batch_max_bytes(batch_max_bytes, batch_cap_items)
+    file_limit = parse_batch_file_limit(batch_file_limit)
+    pending_batches = deque(
+        build_size_batches(
+            pending_items,
+            batch_cap,
+            file_limit,
+            clamp_to_largest_file=batch_cap_media_items is None,
+        )
+    )
     total_batches = len(pending_batches)
     if progress:
         progress.update(total_batches=total_batches, completed_batches=0)
@@ -399,11 +430,15 @@ def process_pipeline(
     )
     if progress:
         progress.log(f"Using download batch size cap: {batch_cap or 'unknown'} bytes")
+        if file_limit:
+            progress.log(f"Using download files per batch cap: {file_limit}")
     else:
         print(
             f"Using download batch size cap: {batch_cap or 'unknown'} bytes",
             flush=True,
         )
+        if file_limit:
+            print(f"Using download files per batch cap: {file_limit}", flush=True)
 
     batch_index = 0
     while pending_batches:
