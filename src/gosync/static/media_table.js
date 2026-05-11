@@ -12,13 +12,6 @@
     return;
   }
 
-  let sidecarItems = [];
-  let lastItemsSignature = "";
-  let requestedExtensionFilter = restoredSettings.extensionFilter || "";
-  let pendingScrollTop = Number(restoredSettings.tableScrollTop) || 0;
-  let pendingScrollLeft = Number(restoredSettings.tableScrollLeft) || 0;
-  let scrollSaveTimer = null;
-
   const readSettings = () => {
     try {
       return JSON.parse(sessionStorage.getItem(settingsKey) || "{}");
@@ -28,6 +21,12 @@
   };
 
   const restoredSettings = readSettings();
+  let sidecarItems = [];
+  let lastItemsSignature = "";
+  let requestedExtensionFilter = restoredSettings.extensionFilter || "";
+  let pendingScrollTop = Number(restoredSettings.tableScrollTop) || 0;
+  let pendingScrollLeft = Number(restoredSettings.tableScrollLeft) || 0;
+  let scrollSaveTimer = null;
   let selectedMediaKeys = Array.isArray(restoredSettings.selectedKeys)
     ? new Set(restoredSettings.selectedKeys)
     : null;

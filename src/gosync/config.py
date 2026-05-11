@@ -48,8 +48,8 @@ def parse_args() -> argparse.Namespace:
         "--har-file",
         default=os.getenv("HAR_FILE"),
         help=(
-            "HAR filename or path. Defaults to gopro.com.har, then any single "
-            "*.har file."
+            "HAR filename inside data-dir. Defaults to gopro.com.har, then any "
+            "single *.har file."
         ),
     )
     parser.add_argument(

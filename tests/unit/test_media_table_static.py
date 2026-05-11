@@ -32,3 +32,14 @@ def test_media_table_persists_view_state_across_reloads() -> None:
         "let pendingScrollLeft = Number(restoredSettings.tableScrollLeft) || 0"
         in script
     )
+
+
+def test_media_table_reads_restored_settings_before_using_them() -> None:
+    script = MEDIA_TABLE_JS.read_text(encoding="utf-8")
+
+    assert script.index("const restoredSettings = readSettings();") < script.index(
+        "let requestedExtensionFilter = restoredSettings.extensionFilter || \"\";"
+    )
+    assert script.index("const restoredSettings = readSettings();") < script.index(
+        "let pendingScrollTop = Number(restoredSettings.tableScrollTop) || 0;"
+    )

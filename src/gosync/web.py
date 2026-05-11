@@ -4,7 +4,15 @@ import threading
 from pathlib import Path
 from uuid import uuid4
 
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    url_for,
+)
 from werkzeug.utils import secure_filename
 
 from gosync import __version__
@@ -214,6 +222,14 @@ def create_app(args: argparse.Namespace) -> Flask:
             app_version=__version__,
             har_files=har_files,
             har_file=current_har or "No HAR file uploaded",
+        )
+
+    @app.get("/favicon.ico")
+    def favicon():
+        return send_from_directory(
+            app.static_folder,
+            "favicon.ico",
+            mimetype="image/vnd.microsoft.icon",
         )
 
     @app.post("/upload")

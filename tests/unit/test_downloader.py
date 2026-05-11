@@ -243,7 +243,7 @@ def test_resolve_har_file_rejects_parent_directory_traversal(
     outside_har = tmp_path / "outside.har"
     outside_har.write_text("{}", encoding="utf-8")
 
-    with pytest.raises(FileNotFoundError, match="inside data directory"):
+    with pytest.raises(FileNotFoundError, match="must be a filename"):
         resolve_har_file(data_dir, "../outside.har")
 
 
@@ -255,11 +255,30 @@ def test_resolve_har_file_rejects_absolute_paths_outside_data_dir(
     outside_har = tmp_path / "outside.har"
     outside_har.write_text("{}", encoding="utf-8")
 
-    with pytest.raises(FileNotFoundError, match="inside data directory"):
+    with pytest.raises(FileNotFoundError, match="must be a filename"):
         resolve_har_file(data_dir, str(outside_har))
 
 
-def test_resolve_har_file_allows_paths_inside_data_dir(tmp_path: Path) -> None:
+def test_resolve_har_file_rejects_nested_paths_inside_data_dir(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    nested = data_dir / "nested"
+    nested.mkdir(parents=True)
+    (nested / "inside.har").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="must be a filename"):
+        resolve_har_file(data_dir, "nested/inside.har")
+
+
+def test_resolve_har_file_rejects_non_har_extension(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "inside.txt").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="must use the .har extension"):
+        resolve_har_file(data_dir, "inside.txt")
+
+
+def test_resolve_har_file_allows_har_filename_inside_data_dir(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     har_path = data_dir / "inside.har"

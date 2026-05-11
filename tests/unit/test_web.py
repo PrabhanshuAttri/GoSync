@@ -127,6 +127,20 @@ def test_sidecars_endpoint_includes_media_file_size(
     assert items[0]["file_size"] == 100
 
 
+def test_favicon_endpoint_serves_icon(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    app = web.create_app(web_args(tmp_path))
+
+    response = app.test_client().get("/favicon.ico")
+
+    assert response.status_code == 200
+    assert response.mimetype == "image/vnd.microsoft.icon"
+    assert response.data.startswith(b"\x00\x00\x01\x00")
+
+
 def test_polling_endpoints_do_not_reprepare_manifest_state(
     tmp_path: Path,
     write_sample_har,

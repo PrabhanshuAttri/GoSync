@@ -99,7 +99,7 @@ sensitive field exclusions.
 | `GOSYNC_VOLUME_PATH` | `./data` | Host path mounted to `/data` by `docker-compose.yml`. |
 | `GOSYNC_WEB_PORT` | `49152` | Host port mapped to the container web UI by `docker-compose.yml`. |
 | `DATA_DIR` | `/data` | Container path containing the HAR file, downloads, sidecars, metadata dumps, state, and reports. |
-| `HAR_FILE` | `gopro.com.har` | HAR filename or path. Relative paths are resolved inside `DATA_DIR`. |
+| `HAR_FILE` | `gopro.com.har` | HAR filename inside `DATA_DIR`. Paths and non-`.har` filenames are rejected. |
 | `DOWNLOAD_FOLDER` | `downloads` | Download output folder. Relative paths are resolved inside `DATA_DIR`. |
 | `GOSYNC_STATE_FILE` | `gosync_state.json` | JSON state file for all parsed media items. Relative paths are resolved inside `DATA_DIR`. |
 | `BATCH_MAX_BYTES` | `auto` | Requested maximum total source bytes per zip batch. Values above the largest `file_size` in the HAR manifest are capped to that largest file size. |

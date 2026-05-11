@@ -78,16 +78,14 @@ class DownloadCancelled(Exception):
 def resolve_har_file(data_dir: Path, har_file: str | None) -> Path:
     data_dir = data_dir.resolve()
     if har_file:
-        candidate = Path(har_file)
-        if not candidate.is_absolute():
-            candidate = data_dir / candidate
-        candidate = candidate.resolve()
-        try:
-            candidate.relative_to(data_dir)
-        except ValueError as exc:
+        requested = Path(har_file)
+        if requested.is_absolute() or requested.name != har_file:
             raise FileNotFoundError(
-                f"HAR file must be inside data directory: {data_dir}"
-            ) from exc
+                "HAR file must be a filename inside the data directory."
+            )
+        if requested.suffix.lower() != ".har":
+            raise FileNotFoundError("HAR file must use the .har extension.")
+        candidate = (data_dir / requested.name).resolve()
         if candidate.exists():
             return candidate
         raise FileNotFoundError(f"Could not find HAR file: {candidate}")
