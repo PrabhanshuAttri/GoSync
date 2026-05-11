@@ -1,6 +1,5 @@
 DEFAULT_DATA_DIR = "/data"
 DEFAULT_DOWNLOAD_FOLDER = "downloads"
-DEFAULT_SIDECAR_FOLDER = "sidecars"
 DEFAULT_HAR_FILE = "gopro.com.har"
 DEFAULT_STATE_FILE = "gosync_state.json"
 DEFAULT_MANIFEST_FILE = "manifest.json"

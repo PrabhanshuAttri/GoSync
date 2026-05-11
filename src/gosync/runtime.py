@@ -9,18 +9,17 @@ from gosync.constants import (
     DEFAULT_MANIFEST_FILE,
     DEFAULT_MEDIA_RESPONSES_FILE,
     STATUS_COMPLETE,
-    STATUS_DOWNLOADED,
     STATUS_STOPPED,
 )
 from gosync.downloader import (
     DownloadCancelled,
+    completed_count_for_items,
     extract_browser_headers,
     process_pipeline,
     resolve_har_file,
 )
 from gosync.logging_config import LOGGER, configure_file_logging
 from gosync.manifest import (
-    MediaItem,
     MediaManifest,
     format_extension_summary,
     read_manifest_from_har,
@@ -43,7 +42,6 @@ class RuntimePaths:
     data_dir: Path
     har_path: Path
     output_dir: Path
-    sidecar_dir: Path
     state_file: Path
     manifest_file: Path
     media_dump_file: Path
@@ -68,7 +66,6 @@ def get_runtime_paths(
         data_dir,
         resolve_har_file(data_dir, har_file or args.har_file),
         resolve_inside_data_dir(data_dir, args.output_folder).resolve(),
-        resolve_inside_data_dir(data_dir, args.sidecar_folder).resolve(),
         resolve_inside_data_dir(data_dir, args.state_file).resolve(),
         resolve_inside_data_dir(data_dir, DEFAULT_MANIFEST_FILE).resolve(),
         resolve_inside_data_dir(data_dir, DEFAULT_MEDIA_RESPONSES_FILE).resolve(),
@@ -149,22 +146,11 @@ def format_manifest_state_summary(manifest: MediaManifest, state: dict) -> str:
     )
 
 
-def _completed_count_for_items(state: dict, media_items: list[MediaItem]) -> int:
-    media = state.get("media", {})
-    if not isinstance(media, dict):
-        return 0
-    return sum(
-        1
-        for item in media_items
-        if isinstance(media.get(item.key), dict)
-        and media[item.key].get("download_status") == STATUS_DOWNLOADED
-    )
-
-
 def startup_media_summaries(args: argparse.Namespace) -> list[str]:
     try:
         prepared = prepare_runtime_manifest_state(args)
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("Failed to prepare startup media summaries: %s", exc)
         return []
     return [format_manifest_state_summary(prepared.manifest, prepared.state)]
 
@@ -244,20 +230,22 @@ def run_download_job(
     har_file: str | None = None,
     selected_keys: set[str] | None = None,
     batch_file_limit: str | int | None = None,
+    job_id: str | None = None,
 ) -> None:
     manifest: MediaManifest | None = None
     sync_changes: list[dict[str, str]] = []
     data_dir: Path | None = None
     state_file: Path | None = None
+    active_job_id = job_id or ""
     try:
-        job_id = uuid4().hex
+        active_job_id = active_job_id or uuid4().hex
         paths = get_runtime_paths(args, har_file)
         data_dir = paths.data_dir
         state_file = paths.state_file
         progress.update(
             status="running",
             state_label="Processing",
-            job_id=job_id,
+            job_id=active_job_id,
             stop_requested=False,
             started_at=datetime.now().isoformat(timespec="seconds"),
             finished_at="",
@@ -280,7 +268,10 @@ def run_download_job(
             sidecar_dir=str(paths.output_dir),
             har_file=str(paths.har_path),
         )
-        progress.log(f"Scanning HAR file: {paths.har_path.name}")
+        progress.log(
+            f"Scanning HAR file: {paths.har_path.name}",
+            job_id_guard=active_job_id,
+        )
         prepared = prepare_paths_manifest_state(paths)
         manifest = prepared.manifest
         media_items = (
@@ -290,8 +281,9 @@ def run_download_job(
         )
         state = prepared.state
         sync_changes = prepared.sync_changes
-        selected_completed_count = _completed_count_for_items(state, media_items)
+        selected_completed_count = completed_count_for_items(state, media_items)
         progress.update(
+            job_id_guard=active_job_id,
             total_ids=len(media_items),
             completed_ids=selected_completed_count,
             pending_ids=max(len(media_items) - selected_completed_count, 0),
@@ -301,7 +293,10 @@ def run_download_job(
             sidecar_message="XMP sidecar generation queued.",
         )
         if selected_keys is not None:
-            progress.log(f"Selected {len(media_items)} media files for download.")
+            progress.log(
+                f"Selected {len(media_items)} media files for download.",
+                job_id_guard=active_job_id,
+            )
         headers = extract_browser_headers(paths.har_path)
         process_pipeline(
             media_items=media_items,
@@ -313,6 +308,7 @@ def run_download_job(
             progress=progress,
             batch_file_limit=batch_file_limit,
             batch_cap_media_items=manifest.media,
+            job_id=active_job_id,
         )
         final_state = load_state(state_file)
         report_path = write_run_report(
@@ -323,6 +319,7 @@ def run_download_job(
             sync_changes,
         )
         progress.update(
+            job_id_guard=active_job_id,
             status="complete",
             state_label="Completed",
             finished_at=datetime.now().isoformat(timespec="seconds"),
@@ -340,7 +337,8 @@ def run_download_job(
                 STATUS_COMPLETE,
                 sync_changes,
                 report_path,
-            )
+            ),
+            job_id_guard=active_job_id,
         )
     except DownloadCancelled:
         report_path = ""
@@ -357,6 +355,7 @@ def run_download_job(
                 )
             )
         progress.update(
+            job_id_guard=active_job_id,
             status="stopped",
             state_label="Stopped",
             finished_at=datetime.now().isoformat(timespec="seconds"),
@@ -379,16 +378,22 @@ def run_download_job(
                     STATUS_STOPPED,
                     sync_changes,
                     report_path,
-                )
+                ),
+                job_id_guard=active_job_id,
             )
         else:
-            progress.log_event("Download stopped by user.", "Stopped")
+            progress.log_event(
+                "Download stopped by user.",
+                "Stopped",
+                job_id_guard=active_job_id,
+            )
     except Exception as exc:
         progress.update(
+            job_id_guard=active_job_id,
             status="failed",
             state_label="Failed",
             finished_at=datetime.now().isoformat(timespec="seconds"),
             stop_requested=False,
         )
         LOGGER.exception("Download job failed.")
-        progress.log(f"Failed: {exc}")
+        progress.log(f"Failed: {exc}", job_id_guard=active_job_id)

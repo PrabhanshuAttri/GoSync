@@ -40,35 +40,63 @@ class ProgressState:
     notifications: list[dict[str, str]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def update(self, **kwargs) -> None:
+    def _job_matches(self, job_id: str | None) -> bool:
+        return not job_id or self.job_id == job_id
+
+    def update(self, job_id_guard: str | None = None, **kwargs) -> bool:
         with self.lock:
+            if not self._job_matches(job_id_guard):
+                return False
             for key, value in kwargs.items():
                 setattr(self, key, value)
+            return True
 
-    def increment(self, key: str, amount: int) -> None:
+    def increment(
+        self,
+        key: str,
+        amount: int,
+        job_id_guard: str | None = None,
+    ) -> int | None:
         with self.lock:
-            setattr(self, key, getattr(self, key) + amount)
+            if not self._job_matches(job_id_guard):
+                return None
+            value = getattr(self, key) + amount
+            setattr(self, key, value)
+            return value
 
-    def log(self, message: str) -> None:
+    def log(self, message: str, job_id_guard: str | None = None) -> bool:
         timestamp = datetime.now().strftime("%H:%M:%S")
         with self.lock:
+            if not self._job_matches(job_id_guard):
+                return False
             self.message = message
             self.events.append(f"[{timestamp}] {message}")
             self.events = self.events[-80:]
         LOGGER.info(message)
         print(message, flush=True)
+        return True
 
-    def log_background(self, message: str) -> None:
+    def log_background(self, message: str, job_id_guard: str | None = None) -> bool:
         timestamp = datetime.now().strftime("%H:%M:%S")
         with self.lock:
+            if not self._job_matches(job_id_guard):
+                return False
             self.events.append(f"[{timestamp}] {message}")
             self.events = self.events[-80:]
         LOGGER.info(message)
         print(message, flush=True)
+        return True
 
-    def log_event(self, message: str, state_label: str | None = None) -> None:
+    def log_event(
+        self,
+        message: str,
+        state_label: str | None = None,
+        job_id_guard: str | None = None,
+    ) -> bool:
         timestamp = datetime.now().strftime("%H:%M:%S")
         with self.lock:
+            if not self._job_matches(job_id_guard):
+                return False
             self.message = message
             if state_label:
                 self.state_label = state_label
@@ -76,10 +104,19 @@ class ProgressState:
             self.events = self.events[-80:]
         LOGGER.info(message)
         print(message, flush=True)
+        return True
 
-    def notify(self, level: str, title: str, message: str) -> None:
+    def notify(
+        self,
+        level: str,
+        title: str,
+        message: str,
+        job_id_guard: str | None = None,
+    ) -> bool:
         timestamp = datetime.now()
         with self.lock:
+            if not self._job_matches(job_id_guard):
+                return False
             self.notifications.append(
                 {
                     "id": f"{timestamp.timestamp():.6f}-{len(self.notifications)}",
@@ -90,6 +127,7 @@ class ProgressState:
                 }
             )
             self.notifications = self.notifications[-40:]
+        return True
 
     def snapshot(self) -> dict:
         with self.lock:

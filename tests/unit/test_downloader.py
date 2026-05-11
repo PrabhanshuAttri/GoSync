@@ -16,7 +16,8 @@ from gosync.downloader import (
 )
 from gosync.manifest import MediaManifest
 from gosync.paths import media_download_path
-from gosync.state import create_or_update_state
+from gosync.progress import ProgressState
+from gosync.state import create_or_update_state, mark_downloaded
 
 
 def test_size_batches_use_largest_file_as_auto_cap(make_media_item) -> None:
@@ -102,7 +103,14 @@ def test_process_pipeline_uses_full_manifest_for_auto_batch_cap(
     )
     downloaded_batches = []
 
-    def fake_download_batch(_session, batch, temp_zip, _headers, _progress=None):
+    def fake_download_batch(
+        _session,
+        batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+    ):
         downloaded_batches.append(batch)
         with zipfile.ZipFile(temp_zip, "w"):
             pass
@@ -123,6 +131,58 @@ def test_process_pipeline_uses_full_manifest_for_auto_batch_cap(
     )
 
     assert downloaded_batches == [["B", "C", "D"]]
+
+
+def test_process_pipeline_counts_progress_for_active_items_only(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    already_done = make_media_item("A", "already.mp4", 100)
+    selected = make_media_item("B", "selected.mp4", 10)
+    state_file = tmp_path / "state.json"
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[already_done, selected],
+            duplicates=[],
+            matching_entries=1,
+            media_responses=[],
+        ),
+    )
+    mark_downloaded(state_file, [already_done.key])
+    progress = ProgressState(job_id="job-1")
+
+    def fake_download_batch(
+        _session,
+        _batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+    ):
+        with zipfile.ZipFile(temp_zip, "w"):
+            pass
+
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+    monkeypatch.setattr("gosync.downloader.organize_extracted_media", lambda *_: None)
+
+    process_pipeline(
+        media_items=[selected],
+        data_dir=tmp_path,
+        output_dir=tmp_path / "downloads",
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+        progress=progress,
+        job_id="job-1",
+    )
+
+    snapshot = progress.snapshot()
+    assert snapshot["total_ids"] == 1
+    assert snapshot["completed_ids"] == 1
+    assert snapshot["pending_ids"] == 0
 
 
 def test_size_batches_put_unknown_size_items_in_single_item_batches(

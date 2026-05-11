@@ -10,9 +10,6 @@ from gosync.constants import (
     DEFAULT_DOWNLOAD_FOLDER,
     DEFAULT_STATE_FILE,
 )
-from gosync.constants import (
-    DEFAULT_SIDECAR_FOLDER as FALLBACK_SIDECAR_FOLDER,
-)
 
 ENV = os.getenv("ENV", "production").lower()
 IS_PROD = ENV in {"prod", "production"}
@@ -22,11 +19,8 @@ DEFAULT_OUTPUT_FOLDER = os.getenv(
     "DOWNLOAD_FOLDER",
     os.getenv("OUTPUT_FOLDER", DEFAULT_DOWNLOAD_FOLDER),
 )
-DEFAULT_SIDECAR_FOLDER = os.getenv("SIDECAR_FOLDER", FALLBACK_SIDECAR_FOLDER)
 DEFAULT_STATE_PATH = os.getenv("GOSYNC_STATE_FILE", DEFAULT_STATE_FILE)
 DEFAULT_BATCH_MAX_BYTES = os.getenv("BATCH_MAX_BYTES", "auto")
-DEFAULT_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))
-DEFAULT_MAX_RETRY_PASSES = int(os.getenv("MAX_RETRY_PASSES", "3"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
@@ -67,14 +61,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--sidecar-folder",
-        default=DEFAULT_SIDECAR_FOLDER,
-        help=(
-            "Deprecated. XMP sidecars are written next to media files inside "
-            "the download folder."
-        ),
-    )
-    parser.add_argument(
         "--state-file",
         default=DEFAULT_STATE_PATH,
         help="JSON state filename or path. Relative paths are created inside data-dir.",
@@ -86,18 +72,6 @@ def parse_args() -> argparse.Namespace:
             "Maximum total source bytes per download batch. Use 'auto' to use "
             "the largest file_size from the HAR manifest."
         ),
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=DEFAULT_BATCH_SIZE,
-        help="Number of media IDs to request in each zip batch.",
-    )
-    parser.add_argument(
-        "--max-retry-passes",
-        type=int,
-        default=DEFAULT_MAX_RETRY_PASSES,
-        help="Maximum retry passes for failed batches. Use 0 to retry forever.",
     )
     parser.add_argument(
         "--run-once",

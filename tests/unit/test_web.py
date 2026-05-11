@@ -1,3 +1,4 @@
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,7 +28,6 @@ def web_args(tmp_path: Path) -> SimpleNamespace:
         data_dir=str(tmp_path),
         har_file=None,
         output_folder="downloads",
-        sidecar_folder="sidecars",
         state_file="gosync_state.json",
         batch_max_bytes="auto",
     )
@@ -82,10 +82,13 @@ def test_start_uses_selected_media_keys_and_files_per_batch(
         "NOPQRSTUVWXYZ_GX010002.JPG",
     }
     assert download_thread.args[4] == 2
+    assert isinstance(download_thread.args[5], str)
+    assert download_thread.args[5]
     assert [item.key for item in sidecar_thread.args[3]] == [
         "ABCDEFGHIJKLM_GX010001.MP4",
         "NOPQRSTUVWXYZ_GX010002.JPG",
     ]
+    assert sidecar_thread.args[5] == download_thread.args[5]
 
 
 def test_start_rejects_empty_media_selection(
@@ -122,3 +125,46 @@ def test_sidecars_endpoint_includes_media_file_size(
     items = response.get_json()["items"]
     assert items[0]["filename"] == "GX010001.MP4"
     assert items[0]["file_size"] == 100
+
+
+def test_polling_endpoints_do_not_reprepare_manifest_state(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har")
+    app = web.create_app(web_args(tmp_path))
+
+    def fail_prepare(*_args, **_kwargs):
+        raise AssertionError("poll endpoint should use cached state")
+
+    monkeypatch.setattr(web, "prepare_paths_manifest_state", fail_prepare)
+
+    client = app.test_client()
+    assert client.get("/status").status_code == 200
+
+    sidecars_response = client.get("/sidecars")
+    assert sidecars_response.status_code == 200
+    assert sidecars_response.get_json()["items"][0]["filename"] == "GX010001.MP4"
+
+
+def test_upload_does_not_mutate_shared_args_har_file(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    args = web_args(tmp_path)
+    app = web.create_app(args)
+    har_path = tmp_path / "source.har"
+    write_sample_har(har_path)
+
+    response = app.test_client().post(
+        "/upload",
+        data={"har_file": (BytesIO(har_path.read_bytes()), "uploaded.har")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 302
+    assert args.har_file is None

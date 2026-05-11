@@ -1,5 +1,4 @@
 import json
-import re
 import time
 import zipfile
 from collections import deque
@@ -17,14 +16,12 @@ from gosync.constants import (
     DEFAULT_TEMP_ZIP,
     MAX_SINGLE_FILE_RETRIES,
     SKIPPED_HAR_HEADERS,
+    STATUS_DOWNLOADED,
     ZIP_URL_PREFIX,
 )
 from gosync.manifest import MediaItem
 from gosync.paths import media_download_path, safe_child_path
 from gosync.progress import ProgressState
-from gosync.state import (
-    completed_count as state_completed_count,
-)
 from gosync.state import (
     mark_downloaded,
     mark_failed,
@@ -73,11 +70,6 @@ def format_size_mib(size_bytes: int | None) -> str:
 def format_media_for_log(item: MediaItem) -> str:
     return f"{item.filename} ({item.media_id}, {format_size_mib(item.file_size)})"
 
-ID_PATTERNS = (
-    re.compile(r'\\"id\\":\\"([a-zA-Z0-9]{13})\\"'),
-    re.compile(r'"id"\s*:\s*"([a-zA-Z0-9]{13})"'),
-)
-
 
 class DownloadCancelled(Exception):
     pass
@@ -115,25 +107,6 @@ def resolve_har_file(data_dir: Path, har_file: str | None) -> Path:
         f"Found multiple HAR files in {data_dir}: {names}. "
         "Set HAR_FILE or pass --har-file."
     )
-
-
-def extract_ids(har_path: Path) -> list[str]:
-    print(f"\n--- STEP 1: Scanning {har_path} ---", flush=True)
-    content = har_path.read_text(encoding="utf-8", errors="ignore")
-
-    found_ids: set[str] = set()
-    for pattern in ID_PATTERNS:
-        found_ids.update(pattern.findall(content))
-
-    if not found_ids:
-        raise ValueError(
-            "No media IDs found. Refresh the GoPro media page, scroll to the bottom, "
-            "then export the HAR file again."
-        )
-
-    ids = sorted(found_ids)
-    print(f"Success: found {len(ids)} unique media IDs.", flush=True)
-    return ids
 
 
 def extract_browser_headers(har_path: Path) -> dict[str, str]:
@@ -198,11 +171,6 @@ def extract_browser_headers(har_path: Path) -> dict[str, str]:
         )
 
     return headers
-
-
-def build_batches(ids: list[str], batch_size: int) -> list[list[str]]:
-    return [ids[index : index + batch_size] for index in range(0, len(ids), batch_size)]
-
 
 def parse_batch_max_bytes(value: str | int | None, media_items: list[MediaItem]) -> int:
     valid_sizes = [item.file_size for item in media_items if item.file_size]
@@ -275,6 +243,18 @@ def parse_batch_file_limit(value: str | int | None) -> int | None:
     return parsed
 
 
+def completed_count_for_items(state: dict, media_items: list[MediaItem]) -> int:
+    media = state.get("media", {})
+    if not isinstance(media, dict):
+        return 0
+    return sum(
+        1
+        for item in media_items
+        if isinstance(media.get(item.key), dict)
+        and media[item.key].get("download_status") == STATUS_DOWNLOADED
+    )
+
+
 def safe_extract(zip_ref: zipfile.ZipFile, output_dir: Path) -> None:
     output_root = output_dir.resolve()
 
@@ -325,6 +305,7 @@ def download_batch(
     temp_zip: Path,
     headers: dict[str, str],
     progress: ProgressState | None = None,
+    job_id: str | None = None,
 ) -> None:
     batch_str = ",".join(batch)
     url = f"{ZIP_URL_PREFIX}?ids={batch_str}"
@@ -341,6 +322,7 @@ def download_batch(
             download_started_at = time.monotonic()
             if progress:
                 progress.update(
+                    job_id_guard=job_id,
                     state_label="Downloading",
                     current_download_bytes=0,
                     current_download_total=total_size,
@@ -363,13 +345,18 @@ def download_batch(
                         file.write(chunk)
                         progress_bar.update(len(chunk))
                         if progress:
-                            progress.increment("current_download_bytes", len(chunk))
+                            current_bytes = progress.increment(
+                                "current_download_bytes",
+                                len(chunk),
+                                job_id_guard=job_id,
+                            )
+                            if current_bytes is None:
+                                continue
                             elapsed = max(time.monotonic() - download_started_at, 0.001)
                             progress.update(
+                                job_id_guard=job_id,
                                 current_download_elapsed_seconds=elapsed,
-                                current_download_speed_bps=(
-                                    progress.current_download_bytes / elapsed
-                                ),
+                                current_download_speed_bps=current_bytes / elapsed,
                             )
     except RETRYABLE_DOWNLOAD_ERRORS as exc:
         raise RuntimeError(f"Retryable download error: {exc}") from exc
@@ -385,6 +372,7 @@ def process_pipeline(
     progress: ProgressState | None = None,
     batch_file_limit: str | int | None = None,
     batch_cap_media_items: list[MediaItem] | None = None,
+    job_id: str | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     temp_zip = data_dir / DEFAULT_TEMP_ZIP
@@ -395,16 +383,18 @@ def process_pipeline(
     completed_count = len(media_items) - len(pending_items)
     if progress:
         progress.update(
+            job_id_guard=job_id,
             total_ids=len(media_items),
             completed_ids=completed_count,
             pending_ids=len(pending_items),
             output_dir=str(output_dir),
+            failed_batches=0,
         )
 
     if not pending_items:
         message = f"All {len(media_items)} media files have already been downloaded."
         if progress:
-            progress.log(message)
+            progress.log(message, job_id_guard=job_id)
         else:
             print(f"\n{message}", flush=True)
         return
@@ -422,16 +412,27 @@ def process_pipeline(
     )
     total_batches = len(pending_batches)
     if progress:
-        progress.update(total_batches=total_batches, completed_batches=0)
+        progress.update(
+            job_id_guard=job_id,
+            total_batches=total_batches,
+            completed_batches=0,
+            failed_batches=0,
+        )
 
     print(
         f"\n--- STEP 2: Processing {len(pending_items)} remaining files ---",
         flush=True,
     )
     if progress:
-        progress.log(f"Using download batch size cap: {batch_cap or 'unknown'} bytes")
+        progress.log(
+            f"Using download batch size cap: {batch_cap or 'unknown'} bytes",
+            job_id_guard=job_id,
+        )
         if file_limit:
-            progress.log(f"Using download files per batch cap: {file_limit}")
+            progress.log(
+                f"Using download files per batch cap: {file_limit}",
+                job_id_guard=job_id,
+            )
     else:
         print(
             f"Using download batch size cap: {batch_cap or 'unknown'} bytes",
@@ -458,6 +459,7 @@ def process_pipeline(
         )
         if progress:
             progress.update(
+                job_id_guard=job_id,
                 state_label="Processing",
                 current_batch=batch_index,
                 current_batch_size=len(batch),
@@ -468,12 +470,12 @@ def process_pipeline(
                 current_download_speed_bps=0,
                 current_download_elapsed_seconds=0,
             )
-            progress.log(message)
+            progress.log(message, job_id_guard=job_id)
         else:
             print(f"\n{message}", flush=True)
 
         try:
-            download_batch(session, batch_ids, temp_zip, headers, progress)
+            download_batch(session, batch_ids, temp_zip, headers, progress, job_id)
 
             try:
                 with zipfile.ZipFile(temp_zip) as zip_ref:
@@ -484,6 +486,7 @@ def process_pipeline(
                         )
                     if progress:
                         progress.update(
+                            job_id_guard=job_id,
                             state_label="Extracting",
                             current_download_bytes=0,
                             current_download_total=0,
@@ -501,12 +504,13 @@ def process_pipeline(
 
             temp_zip.unlink(missing_ok=True)
             state = mark_downloaded(state_file, batch_keys)
-            completed_count = state_completed_count(state)
+            completed_count = completed_count_for_items(state, media_items)
             downloaded_list = "\n".join(
                 f"  - {format_media_for_log(item)}" for item in batch
             )
             if progress:
                 progress.update(
+                    job_id_guard=job_id,
                     completed_ids=completed_count,
                     pending_ids=max(len(media_items) - completed_count, 0),
                     current_download_bytes=0,
@@ -515,13 +519,18 @@ def process_pipeline(
                     current_download_speed_bps=0,
                     current_download_elapsed_seconds=0,
                     current_batch_keys=[],
+                    failed_batches=0,
                 )
-                progress.increment("completed_batches", 1)
-                progress.log_background(f"Batch downloaded:\n{downloaded_list}")
+                progress.increment("completed_batches", 1, job_id_guard=job_id)
+                progress.log_background(
+                    f"Batch downloaded:\n{downloaded_list}",
+                    job_id_guard=job_id,
+                )
                 progress.notify(
                     "success",
                     "Batch complete",
                     f"{len(batch)} {pluralize(len(batch), 'file')} downloaded.",
+                    job_id_guard=job_id,
                 )
             else:
                 print(f"Batch downloaded:\n{downloaded_list}", flush=True)
@@ -557,17 +566,19 @@ def process_pipeline(
                     retry_message = "Single-file retry limit reached."
 
             if progress:
-                progress.increment("failed_batches", 1)
-                progress.update(current_batch_keys=[])
+                progress.update(job_id_guard=job_id, failed_batches=1)
+                progress.update(job_id_guard=job_id, current_batch_keys=[])
                 progress.log(
                     f"Batch failed: {exc}\nFiles in failed batch:\n"
-                    f"{batch_file_list}\n{retry_message}"
+                    f"{batch_file_list}\n{retry_message}",
+                    job_id_guard=job_id,
                 )
                 progress.notify(
                     "error",
                     "Batch failed",
                     f"{len(batch)} {pluralize(len(batch), 'file')} failed. "
                     f"{retry_message}",
+                    job_id_guard=job_id,
                 )
             else:
                 print(
