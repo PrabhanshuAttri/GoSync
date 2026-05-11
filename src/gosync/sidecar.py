@@ -176,6 +176,10 @@ def write_sidecars_for_manifest(
     written_keys: list[str] = []
 
     for media_item in media_items:
+        # Skip JSON files
+        if media_item.filename.lower().endswith('.json'):
+            continue
+            
         sidecar_path = sidecar_output_path(
             output_dir,
             media_item.filename,
