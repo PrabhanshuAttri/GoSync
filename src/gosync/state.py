@@ -1,17 +1,12 @@
 import json
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from gosync.constants import (
-    DEFAULT_LEGACY_COMPLETED_LOG,
-    STATUS_DOWNLOADED,
-    STATUS_FAILED,
-    STATUS_PENDING,
-)
+from gosync.constants import STATUS_DOWNLOADED, STATUS_FAILED, STATUS_PENDING
 from gosync.manifest import MediaManifest
-from gosync.paths import media_download_path
-
+from gosync.paths import media_download_path, safe_child_path
 
 STATE_VERSION = 1
 
@@ -41,27 +36,14 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
-def _legacy_completed_ids(data_dir: Path) -> set[str]:
-    legacy_log = data_dir / DEFAULT_LEGACY_COMPLETED_LOG
-    if not legacy_log.exists():
-        return set()
-    content = legacy_log.read_text(encoding="utf-8", errors="ignore")
-    return {media_id.strip() for media_id in content.split(",") if media_id.strip()}
-
-
 def create_or_update_state(
     state_file: Path,
     manifest: MediaManifest,
-    data_dir: Path,
 ) -> dict[str, Any]:
     existing = _read_json(state_file)
     existing_media = existing.get("media", {})
     if not isinstance(existing_media, dict):
         existing_media = {}
-
-    legacy_ids = set()
-    if not existing.get("legacy_completed_ids_imported"):
-        legacy_ids = _legacy_completed_ids(data_dir)
 
     media_records: dict[str, dict[str, Any]] = {}
     for item in manifest.media:
@@ -70,8 +52,6 @@ def create_or_update_state(
             previous = {}
 
         download_status = str(previous.get("download_status") or STATUS_PENDING)
-        if item.media_id in legacy_ids and download_status == STATUS_PENDING:
-            download_status = STATUS_DOWNLOADED
 
         media_records[item.key] = {
             "key": item.key,
@@ -89,7 +69,6 @@ def create_or_update_state(
         "version": STATE_VERSION,
         "created_at": existing.get("created_at") or _now(),
         "updated_at": existing.get("updated_at") or "",
-        "legacy_completed_ids_imported": True,
         "media": media_records,
     }
     _write_json(state_file, payload)
@@ -103,7 +82,6 @@ def load_state(state_file: Path) -> dict[str, Any]:
             "version": STATE_VERSION,
             "created_at": _now(),
             "updated_at": "",
-            "legacy_completed_ids_imported": True,
             "media": {},
         }
     return payload
@@ -111,6 +89,38 @@ def load_state(state_file: Path) -> dict[str, Any]:
 
 def save_state(state_file: Path, state: dict[str, Any]) -> None:
     _write_json(state_file, state)
+
+
+def downloaded_filename_index(output_dir: Path) -> set[str]:
+    if not output_dir.exists():
+        return set()
+    return {
+        path.name.casefold()
+        for path in output_dir.rglob("*")
+        if safe_child_path(output_dir, path)
+        and path.is_file()
+        and path.suffix.casefold() != ".xmp"
+    }
+
+
+def _is_safe_child_path(base_dir: Path, candidate: Path) -> bool:
+    return safe_child_path(base_dir, candidate)
+
+
+def media_file_exists(
+    output_dir: Path,
+    filename: str,
+    existing_filenames: set[str] | None = None,
+) -> bool:
+    if existing_filenames is None:
+        existing_filenames = downloaded_filename_index(output_dir)
+    media_path = media_download_path(output_dir, filename)
+    legacy_path = output_dir / filename
+    return (
+        (_is_safe_child_path(output_dir, media_path) and media_path.is_file())
+        or (_is_safe_child_path(output_dir, legacy_path) and legacy_path.is_file())
+        or filename.casefold() in existing_filenames
+    )
 
 
 def sync_state_with_downloads(
@@ -124,6 +134,7 @@ def sync_state_with_downloads(
         state["media"] = media
 
     changed: list[dict[str, str]] = []
+    existing_filenames = downloaded_filename_index(output_dir)
     for record in media.values():
         if not isinstance(record, dict):
             continue
@@ -131,7 +142,7 @@ def sync_state_with_downloads(
         if not filename:
             continue
 
-        exists = media_download_path(output_dir, filename).is_file()
+        exists = media_file_exists(output_dir, filename, existing_filenames)
         current_status = str(record.get("download_status") or STATUS_PENDING)
         if exists and current_status != STATUS_DOWNLOADED:
             record["download_status"] = STATUS_DOWNLOADED
@@ -171,6 +182,30 @@ def completed_count(state: dict[str, Any]) -> int:
         for record in media_records(state)
         if record.get("download_status") == STATUS_DOWNLOADED
     )
+
+
+def downloaded_extension_counts(state: dict[str, Any]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for record in media_records(state):
+        if record.get("download_status") != STATUS_DOWNLOADED:
+            continue
+        filename = str(record.get("filename") or "")
+        extension = Path(filename).suffix.lower().lstrip(".") or "no_extension"
+        counts[extension] += 1
+    return dict(sorted(counts.items()))
+
+
+def format_downloaded_extension_summary(state: dict[str, Any]) -> str:
+    counts = downloaded_extension_counts(state)
+    total = sum(counts.values())
+    if not counts:
+        return "Already downloaded by extension: none (0 files)"
+
+    details = ", ".join(
+        f"{extension.upper()}: {count}" for extension, count in counts.items()
+    )
+    file_label = "file" if total == 1 else "files"
+    return f"Already downloaded by extension: {details} ({total} {file_label})"
 
 
 def pending_keys(state: dict[str, Any]) -> set[str]:

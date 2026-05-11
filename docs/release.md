@@ -1,8 +1,8 @@
 # Release Process
 
-GoSync uses two Docker publishing paths:
+GoSync publishes container images to GitHub Container Registry (GHCR):
 
-- Pull requests build the Docker image for validation only. They do not publish
+- Pull requests build the container image for validation only. They do not publish
   a GHCR image.
 - Pushes to `main`, including merged pull requests, publish rolling image tags:
   `latest`, `main`, and `sha-<commit>`.
@@ -36,7 +36,7 @@ When you want a stable release, update every release-facing version reference:
 - `README.md`
 - any release notes or docs that mention the current version
 
-The Docker workflow reads the package version from `src/gosync/__init__.py` and
+The GHCR publishing workflow reads the package version from `src/gosync/__init__.py` and
 passes it into the image build as `GOSYNC_VERSION`.
 
 Verify the version and compose file:
@@ -69,7 +69,7 @@ git tag -s v<version> -m "Release GoSync <version>"
 git push origin v<version>
 ```
 
-The GitHub Actions workflow publishes the versioned image after the tag push.
+The GitHub Actions workflow publishes the versioned image to GHCR after the tag push.
 Wait for the workflow to complete before installing the versioned image in
 TrueNAS or Docker Compose.
 

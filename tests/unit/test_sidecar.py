@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from gosync.paths import sidecar_output_path
 from gosync.sidecar import (
     build_xmp,
     generate_sidecars_from_har,
@@ -11,7 +12,6 @@ from gosync.sidecar import (
     xml_escape,
     xmp_property_name,
 )
-from gosync.paths import sidecar_output_path
 
 
 def test_xml_helpers_escape_values_and_normalize_property_names() -> None:

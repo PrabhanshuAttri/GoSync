@@ -5,12 +5,11 @@ from pathlib import Path
 from gosync import __version__
 from gosync.constants import (
     DEFAULT_DATA_DIR as FALLBACK_DATA_DIR,
+)
+from gosync.constants import (
     DEFAULT_DOWNLOAD_FOLDER,
-    DEFAULT_LEGACY_COMPLETED_LOG,
-    DEFAULT_SIDECAR_FOLDER as FALLBACK_SIDECAR_FOLDER,
     DEFAULT_STATE_FILE,
 )
-
 
 ENV = os.getenv("ENV", "production").lower()
 IS_PROD = ENV in {"prod", "production"}
@@ -20,15 +19,12 @@ DEFAULT_OUTPUT_FOLDER = os.getenv(
     "DOWNLOAD_FOLDER",
     os.getenv("OUTPUT_FOLDER", DEFAULT_DOWNLOAD_FOLDER),
 )
-DEFAULT_SIDECAR_FOLDER = os.getenv("SIDECAR_FOLDER", FALLBACK_SIDECAR_FOLDER)
-DEFAULT_COMPLETED_LOG = os.getenv("COMPLETED_LOG", DEFAULT_LEGACY_COMPLETED_LOG)
 DEFAULT_STATE_PATH = os.getenv("GOSYNC_STATE_FILE", DEFAULT_STATE_FILE)
 DEFAULT_BATCH_MAX_BYTES = os.getenv("BATCH_MAX_BYTES", "auto")
-DEFAULT_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))
-DEFAULT_MAX_RETRY_PASSES = int(os.getenv("MAX_RETRY_PASSES", "3"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
+DISPLAY_WEB_PORT = int(os.getenv("GOSYNC_WEB_PORT", str(WEB_PORT)))
 ACCESS_LOGS = os.getenv("ACCESS_LOGS", "true").lower() in {"1", "true", "yes", "on"}
 
 
@@ -52,8 +48,8 @@ def parse_args() -> argparse.Namespace:
         "--har-file",
         default=os.getenv("HAR_FILE"),
         help=(
-            "HAR filename or path. Defaults to gopro.com.har, then any single "
-            "*.har file."
+            "HAR filename inside data-dir. Defaults to gopro.com.har, then any "
+            "single *.har file."
         ),
     )
     parser.add_argument(
@@ -62,22 +58,6 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Download folder name or path. Relative paths are created inside "
             "data-dir."
-        ),
-    )
-    parser.add_argument(
-        "--sidecar-folder",
-        default=DEFAULT_SIDECAR_FOLDER,
-        help=(
-            "Deprecated. XMP sidecars are written next to media files inside "
-            "the download folder."
-        ),
-    )
-    parser.add_argument(
-        "--completed-log",
-        default=DEFAULT_COMPLETED_LOG,
-        help=(
-            "Legacy completion ledger imported for compatibility. "
-            "New resume state is stored in --state-file."
         ),
     )
     parser.add_argument(
@@ -94,18 +74,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=DEFAULT_BATCH_SIZE,
-        help="Number of media IDs to request in each zip batch.",
-    )
-    parser.add_argument(
-        "--max-retry-passes",
-        type=int,
-        default=DEFAULT_MAX_RETRY_PASSES,
-        help="Maximum retry passes for failed batches. Use 0 to retry forever.",
-    )
-    parser.add_argument(
         "--run-once",
         action="store_true",
         help=(
@@ -117,7 +85,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_inside_data_dir(data_dir: Path, value: str) -> Path:
+    data_dir = data_dir.resolve()
     path = Path(value)
-    if path.is_absolute():
-        return path
-    return data_dir / path
+    candidate = path if path.is_absolute() else data_dir / path
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(data_dir)
+    except ValueError as exc:
+        raise ValueError(f"Path must be inside data directory: {data_dir}") from exc
+    return candidate

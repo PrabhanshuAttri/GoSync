@@ -1,13 +1,12 @@
 import base64
-from collections import Counter
 import json
 import logging
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from gosync.constants import MEDIA_LIST_KEYS, MEDIA_SEARCH_URL
-
 
 LOGGER = logging.getLogger("gosync.manifest")
 
@@ -77,7 +76,7 @@ def format_extension_summary(manifest: MediaManifest) -> str:
     summary = ", ".join(
         f"{extension.upper()}: {count}" for extension, count in counts.items()
     )
-    return f"Media by extension: {summary}"
+    return f"HAR Media by extension: {summary}"
 
 
 def parse_response_text(text: str, entry_number: int) -> Any | None:

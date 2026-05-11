@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GoSync</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="32x32">
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
@@ -86,12 +87,15 @@
             <h2>Download Job</h2>
             <span class="hint">One active job</span>
           </div>
-          <form action="/start" method="post">
+          <form id="start-form" action="/start" method="post">
             <select name="har_file">
               {% for file in har_files %}
               <option value="{{ file }}" {% if file == har_file %}selected{% endif %}>{{ file }}</option>
               {% endfor %}
             </select>
+            <label class="field-label" for="files-per-batch">Files per batch</label>
+            <input id="files-per-batch" name="files_per_batch" type="number" min="1" step="1" placeholder="Auto">
+            <span class="selection-summary" id="selection-summary">No files selected</span>
             <button id="start-button" class="secondary" type="submit" {% if not har_files %}disabled{% endif %}>Start Download</button>
           </form>
           <form action="/stop" method="post" class="stop-form">
@@ -204,14 +208,28 @@
             <table class="sidecar-table">
               <thead>
                 <tr>
+                  <th class="select-column">
+                    <input id="select-visible" type="checkbox" aria-label="Select visible pending files">
+                  </th>
                   <th>Filename</th>
                   <th>Sidecar Filename</th>
-                  <th>Status</th>
+                  <th>
+                    <button class="sort-button" type="button" data-sort-key="size" aria-label="Sort by size">
+                      <span>Size</span>
+                      <span class="sort-indicator" id="size-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="sort-button active" type="button" data-sort-key="status" aria-label="Sort by status">
+                      <span>Status</span>
+                      <span class="sort-indicator asc" id="status-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody id="sidecar-table-body">
                 <tr>
-                  <td colspan="3" class="empty-cell">No media found.</td>
+                  <td colspan="5" class="empty-cell">No media found.</td>
                 </tr>
               </tbody>
             </table>
@@ -231,6 +249,7 @@
 
   <div class="notifications" id="notifications" aria-live="polite" aria-atomic="false"></div>
 
+  <script src="{{ url_for('static', filename='media_table.js') }}"></script>
   <script>
     const drawerToggle = document.getElementById("drawer-toggle");
     const drawerClose = document.getElementById("drawer-close");
@@ -354,89 +373,10 @@
         window.setTimeout(() => toast.remove(), 220);
       }, notification.level === "error" ? 8000 : 5000);
     };
-    let sidecarItems = [];
-    const extensionFilter = document.getElementById("extension-filter");
-    const mediaExtension = (filename) => {
-      const base = String(filename || "").split(/[\\/]/).pop();
-      const index = base.lastIndexOf(".");
-      return index > -1 && index < base.length - 1
-        ? base.slice(index + 1).toLowerCase()
-        : "";
-    };
-    const syncExtensionFilterOptions = (items) => {
-      const selected = extensionFilter.value;
-      const extensions = Array.from(
-        new Set(items.map((item) => mediaExtension(item.filename)).filter(Boolean))
-      ).sort((a, b) => a.localeCompare(b));
-
-      extensionFilter.replaceChildren();
-      const allOption = document.createElement("option");
-      allOption.value = "";
-      allOption.textContent = "All extensions";
-      extensionFilter.append(allOption);
-
-      extensions.forEach((extension) => {
-        const option = document.createElement("option");
-        option.value = extension;
-        option.textContent = extension.toUpperCase();
-        extensionFilter.append(option);
-      });
-
-      extensionFilter.value = extensions.includes(selected) ? selected : "";
-      extensionFilter.disabled = extensions.length < 2;
-    };
-    const renderSidecarTable = () => {
-      const body = document.getElementById("sidecar-table-body");
-      const selectedExtension = extensionFilter.value;
-      const items = selectedExtension
-        ? sidecarItems.filter((item) => mediaExtension(item.filename) === selectedExtension)
-        : sidecarItems;
-      const sortedItems = [...items].sort((a, b) => {
-        const statusRank = (item) => {
-          if (item.status === "downloading") return 0;
-          if (item.status === "downloaded") return 1;
-          return 2;
-        };
-        return statusRank(a) - statusRank(b)
-          || String(a.filename || "").localeCompare(String(b.filename || ""));
-      });
-
-      if (!sidecarItems.length) {
-        body.innerHTML = '<tr><td colspan="3" class="empty-cell">No media found.</td></tr>';
-        return;
-      }
-      if (!items.length) {
-        body.innerHTML = '<tr><td colspan="3" class="empty-cell">No media matches this filter.</td></tr>';
-        return;
-      }
-
-      body.replaceChildren();
-      sortedItems.forEach((item) => {
-        const row = document.createElement("tr");
-        const filename = document.createElement("td");
-        const sidecar = document.createElement("td");
-        const statusCell = document.createElement("td");
-        const status = document.createElement("span");
-
-        filename.textContent = item.filename;
-        filename.title = item.filename;
-        sidecar.textContent = item.sidecar_filename;
-        sidecar.title = item.sidecar_filename;
-        status.className = `table-status ${item.status}`;
-        status.textContent = item.status;
-
-        statusCell.append(status);
-        row.append(filename, sidecar, statusCell);
-        body.append(row);
-      });
-    };
-    extensionFilter.addEventListener("change", renderSidecarTable);
     const refreshSidecarTable = async () => {
       const res = await fetch("/sidecars");
       const data = await res.json();
-      sidecarItems = data.items || [];
-      syncExtensionFilterOptions(sidecarItems);
-      renderSidecarTable();
+      window.gosyncMediaTable?.setItems(data.items || []);
     };
     let currentStatus = "idle";
     async function refresh() {

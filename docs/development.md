@@ -31,12 +31,6 @@ Flask debug mode is disabled by default, including for local direct runs. Set
 ENV=dev PYTHONPATH=src python -m gosync --data-dir ./data
 ```
 
-Run the downloader once without the web UI:
-
-```bash
-PYTHONPATH=src python -m gosync --data-dir ./data --run-once
-```
-
 Print the app version:
 
 ```bash
@@ -45,9 +39,11 @@ PYTHONPATH=src python -m gosync --version
 
 ## Tests
 
-Run the full test suite:
+Run the full local verification gate:
 
 ```bash
+python -m compileall -q src tests
+.venv/bin/python -m ruff check src tests
 python -m pytest
 ```
 

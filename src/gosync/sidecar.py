@@ -9,8 +9,6 @@ from xml.sax.saxutils import escape
 from gosync.constants import (
     COMMON_SIDECAR_FIELDS,
     IMAGE_SIDECAR_FIELDS,
-    MEDIA_LIST_KEYS,
-    MEDIA_SEARCH_URL,
     STATUS_COMPLETE,
     STATUS_FAILED,
     STATUS_RUNNING,
@@ -18,13 +16,11 @@ from gosync.constants import (
 )
 from gosync.manifest import (
     MediaItem,
-    parse_response_text,
     read_manifest_from_har,
 )
 from gosync.paths import sidecar_output_path
 from gosync.progress import ProgressState
 from gosync.state import mark_sidecars
-
 
 LOGGER = logging.getLogger("gosync.sidecar")
 
@@ -34,7 +30,7 @@ def xml_value(value: Any) -> str:
         return "True" if value else "False"
     if value is None:
         return ""
-    if isinstance(value, (dict, list)):
+    if isinstance(value, dict | list):
         return json.dumps(value, sort_keys=True, separators=(",", ":"))
     return str(value)
 
@@ -67,62 +63,6 @@ def xmp_property_name(key: str) -> str:
     if name[0].isdigit():
         return f"Field{name}"
     return name
-
-
-def is_media_file(item: Any) -> bool:
-    if not isinstance(item, dict):
-        return False
-
-    filename = item.get("filename")
-    extension = item.get("file_extension") or Path(
-        str(filename or "")
-    ).suffix.lstrip(".")
-    if not filename or not extension:
-        return False
-
-    content_type = str(item.get("content_type", "")).lower()
-    item_type = str(item.get("type", "")).lower()
-    non_media_types = {
-        "album",
-        "folder",
-        "page",
-        "pagination",
-        "profile",
-        "summary",
-    }
-    return item_type not in non_media_types and content_type not in non_media_types
-
-
-def iter_candidate_lists(response_json: Any) -> list[list[Any]]:
-    lists: list[list[Any]] = []
-    if not isinstance(response_json, dict):
-        return lists
-
-    embedded = response_json.get("_embedded")
-    if isinstance(embedded, dict):
-        for key in MEDIA_LIST_KEYS:
-            value = embedded.get(key)
-            if isinstance(value, list):
-                lists.append(value)
-
-    for key in MEDIA_LIST_KEYS:
-        value = response_json.get(key)
-        if isinstance(value, list):
-            lists.append(value)
-
-    return lists
-
-
-def collect_media_items(obj: Any, found: list[dict[str, Any]]) -> None:
-    if isinstance(obj, dict):
-        if is_media_file(obj):
-            found.append(obj)
-            return
-        for value in obj.values():
-            collect_media_items(value, found)
-    elif isinstance(obj, list):
-        for item in obj:
-            collect_media_items(item, found)
 
 
 def sidecar_stem(metadata: dict[str, Any]) -> str:
@@ -164,70 +104,6 @@ def sidecar_field_names(metadata: dict[str, Any]) -> set[str]:
     if kind == "image":
         return IMAGE_SIDECAR_FIELDS
     return COMMON_SIDECAR_FIELDS
-
-
-def extract_media_items(response_json: Any) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for candidate_list in iter_candidate_lists(response_json):
-        for item in candidate_list:
-            if is_media_file(item):
-                items.append(item)
-
-    if not items:
-        collect_media_items(response_json, items)
-
-    deduped: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in items:
-        identity = str(item.get("id") or sidecar_stem(item))
-        if identity in seen:
-            continue
-        seen.add(identity)
-        deduped.append(item)
-
-    return deduped
-
-
-def read_media_from_har(har_path: Path) -> tuple[list[dict[str, Any]], int]:
-    try:
-        with har_path.open("r", encoding="utf-8", errors="ignore") as file:
-            har_data = json.load(file)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"HAR file not found: {har_path}") from None
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Failed to parse HAR file as JSON: {exc}") from exc
-
-    entries = har_data.get("log", {}).get("entries")
-    if not isinstance(entries, list):
-        raise ValueError("Invalid HAR file structure: missing log.entries")
-
-    media_items: list[dict[str, Any]] = []
-    matching_entries = 0
-
-    for entry in entries:
-        request = entry.get("request", {})
-        url = request.get("url", "")
-        if MEDIA_SEARCH_URL not in url:
-            continue
-
-        matching_entries += 1
-        text = entry.get("response", {}).get("content", {}).get("text", "")
-        response_json = parse_response_text(text, matching_entries)
-        if response_json is None:
-            continue
-
-        media_items.extend(extract_media_items(response_json))
-
-    deduped: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in media_items:
-        identity = str(item.get("id") or sidecar_stem(item))
-        if identity in seen:
-            continue
-        seen.add(identity)
-        deduped.append(item)
-
-    return deduped, matching_entries
 
 
 def build_xmp(metadata: dict[str, Any]) -> str:
@@ -291,20 +167,6 @@ def build_xmp(metadata: dict[str, Any]) -> str:
 """
 
 
-def write_sidecars(media_items: list[dict[str, Any]], output_dir: Path) -> int:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    written = 0
-
-    for metadata in media_items:
-        filename = sidecar_stem(metadata)
-        sidecar_path = sidecar_output_path(output_dir, filename, f"{filename}.xmp")
-        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-        sidecar_path.write_text(build_xmp(metadata), encoding="utf-8")
-        written += 1
-
-    return written
-
-
 def write_sidecars_for_manifest(
     media_items: list[MediaItem],
     output_dir: Path,
@@ -341,17 +203,24 @@ def run_sidecar_job(
     progress: ProgressState | None = None,
     media_items: list[MediaItem] | None = None,
     state_file: Path | None = None,
+    job_id: str | None = None,
 ) -> None:
     try:
         if progress:
             message = f"Generating XMP sidecars in {output_dir}..."
             progress.update(
+                job_id_guard=job_id,
                 sidecar_status=STATUS_RUNNING,
                 sidecar_dir=str(output_dir),
                 sidecar_message=message,
             )
             LOGGER.info(message)
-            progress.notify("info", "XMP sidecars", "Generating XMP sidecar files.")
+            progress.notify(
+                "info",
+                "XMP sidecars",
+                "Generating XMP sidecar files.",
+                job_id_guard=job_id,
+            )
 
         if media_items is None:
             manifest = read_manifest_from_har(har_path)
@@ -373,6 +242,7 @@ def run_sidecar_job(
             else:
                 message = f"Generated {written} XMP sidecar {file_label}."
             progress.update(
+                job_id_guard=job_id,
                 sidecar_status=STATUS_COMPLETE,
                 sidecar_count=written,
                 sidecar_dir=str(output_dir),
@@ -383,6 +253,7 @@ def run_sidecar_job(
                 "success",
                 "XMP sidecars complete",
                 f"Generated {written} XMP sidecar {file_label}.",
+                job_id_guard=job_id,
             )
     except Exception as exc:
         if state_file and media_items:
@@ -395,11 +266,17 @@ def run_sidecar_job(
         if progress:
             message = f"XMP sidecar generation failed: {exc}"
             progress.update(
+                job_id_guard=job_id,
                 sidecar_status=STATUS_FAILED,
                 sidecar_dir=str(output_dir),
                 sidecar_message=message,
             )
             LOGGER.exception("XMP sidecar generation failed.")
-            progress.notify("error", "XMP sidecars failed", str(exc))
+            progress.notify(
+                "error",
+                "XMP sidecars failed",
+                str(exc),
+                job_id_guard=job_id,
+            )
         else:
             raise

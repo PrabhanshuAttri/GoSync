@@ -12,19 +12,22 @@ managing one download job at a time.
 1. Open `http://localhost:49152` when using Docker Compose, or the host port you
    mapped with Docker.
 2. In **HAR File**, upload the HAR export from your logged-in GoPro session.
-3. In **Download Job**, select the uploaded HAR file and click **Start
-   Download**.
-4. Click **Stop Download** if you need to cancel the active job. GoSync stops
+3. In **Download Job**, select the uploaded HAR file and choose **Files per
+   batch** when you want the web UI to limit how many selected files are placed
+   in each batch.
+4. In **Media Files**, select the pending files you want to download. Downloaded
+   rows are disabled. You can filter by extension and sort by size or status.
+5. Click **Start Download**. The browser keeps selected files, sort order, and
+   files-per-batch through the start redirect.
+6. Click **Stop Download** if you need to cancel the active job. GoSync stops
    safely, removes the temporary zip, and keeps JSON state for resume.
-5. Watch **Media**, **Batches**, and **Current Download** progress update live.
-6. Use **Current Activity** for the latest detailed action, such as the batch
-   currently being processed.
-7. Use **Media Files** to see every parsed media item. The table can filter by
-   extension and sorts current downloads first, then downloaded files, then
-   pending files.
-8. Use **Event Log** for a running history of uploads, extension summaries,
+7. Watch **Media Complete**, **Downloaded**, **Batches**, and transfer progress
+   update live.
+8. Use **Status** for the latest detailed action, such as the batch currently
+   being processed.
+9. Use **Event Log** for a running history of uploads, extension summaries,
    retries, stops, failures, completed batches, and final run summaries.
-9. Use the **Light** or **Dark** toggle in the header to switch themes. The
+10. Use the **Light** or **Dark** toggle in the header to switch themes. The
    browser remembers your choice.
 
 The dashboard stores uploaded HAR files in the mounted data directory.
@@ -42,7 +45,10 @@ GoSync downloads media in size-based batches. With the default
 `BATCH_MAX_BYTES=auto`, the batch cap is the largest `file_size` found in the
 HAR manifest. Explicit `BATCH_MAX_BYTES` values above the largest known file are
 capped to that largest file size, so a batch should not be larger than the
-largest individual media file.
+largest individual media file. When the web UI downloads only selected files,
+the automatic byte cap still comes from the full HAR manifest, while the
+files-per-batch control limits how many selected files can be placed in one
+batch.
 
 ## Data Directory Structure
 
@@ -80,8 +86,6 @@ Files and folders:
 - `gosync_state.json`: JSON resume state for every parsed media item,
   configurable with `GOSYNC_STATE_FILE`.
 - `reports/`: run reports written when downloads complete or stop.
-- `completed_ids.txt`: legacy resume ledger imported once for backward
-  compatibility.
 - `gopro_temp_batch.zip`: temporary zip file used during a batch download;
   deleted after extraction or failure.
 
@@ -95,14 +99,10 @@ sensitive field exclusions.
 | `GOSYNC_VOLUME_PATH` | `./data` | Host path mounted to `/data` by `docker-compose.yml`. |
 | `GOSYNC_WEB_PORT` | `49152` | Host port mapped to the container web UI by `docker-compose.yml`. |
 | `DATA_DIR` | `/data` | Container path containing the HAR file, downloads, sidecars, metadata dumps, state, and reports. |
-| `HAR_FILE` | `gopro.com.har` | HAR filename or path. Relative paths are resolved inside `DATA_DIR`. |
+| `HAR_FILE` | `gopro.com.har` | HAR filename inside `DATA_DIR`. Paths and non-`.har` filenames are rejected. |
 | `DOWNLOAD_FOLDER` | `downloads` | Download output folder. Relative paths are resolved inside `DATA_DIR`. |
-| `SIDECAR_FOLDER` | `sidecars` | Deprecated. XMP sidecars are written next to media files inside `DOWNLOAD_FOLDER`. |
 | `GOSYNC_STATE_FILE` | `gosync_state.json` | JSON state file for all parsed media items. Relative paths are resolved inside `DATA_DIR`. |
-| `COMPLETED_LOG` | `completed_ids.txt` | Legacy resume ledger imported once for backward compatibility. |
 | `BATCH_MAX_BYTES` | `auto` | Requested maximum total source bytes per zip batch. Values above the largest `file_size` in the HAR manifest are capped to that largest file size. |
-| `BATCH_SIZE` | `5` | Deprecated; retained for compatibility but not used by size-based batching. |
-| `MAX_RETRY_PASSES` | `3` | Deprecated; multi-file failures split into one-file retries, and single-file batches retry up to 3 times. |
 | `REQUEST_TIMEOUT_SECONDS` | `60` | HTTP request timeout for GoPro API calls. |
 | `ENV` | `production` | Runtime environment. Set to `dev` or `development` to enable Flask debug mode. |
 | `WEB_HOST` | `0.0.0.0` | Container bind host for the web server. |

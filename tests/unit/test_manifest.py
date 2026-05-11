@@ -104,7 +104,10 @@ def test_manifest_deduplicates_and_generates_stable_unnamed_filenames(
     ]
     assert len(manifest.duplicates) == 1
     assert manifest.duplicates[0].key == "ABCDEFGHIJKLM_GX010001.MP4"
-    assert format_extension_summary(manifest) == "Media by extension: JPG: 1, MP4: 2"
+    assert (
+        format_extension_summary(manifest)
+        == "HAR Media by extension: JPG: 1, MP4: 2"
+    )
     assert manifest.media_responses[0]["media"][2]["filename"] == "unnamed_1.MP4"
 
 
@@ -125,4 +128,3 @@ def test_read_manifest_requires_media_search_entries(
 
     with pytest.raises(ValueError, match="No API calls"):
         read_manifest_from_har(har_path)
-
