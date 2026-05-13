@@ -43,3 +43,15 @@ def test_media_table_reads_restored_settings_before_using_them() -> None:
     assert script.index("const restoredSettings = readSettings();") < script.index(
         "let pendingScrollTop = Number(restoredSettings.tableScrollTop) || 0;"
     )
+
+
+def test_media_table_checks_and_disables_downloaded_rows() -> None:
+    script = MEDIA_TABLE_JS.read_text(encoding="utf-8")
+
+    assert "const isDownloaded = (item) => item.status === \"downloaded\";" in script
+    assert (
+        "checkbox.checked = downloaded || selectedMediaKeys?.has(item.key) || false;"
+        in script
+    )
+    assert "checkbox.disabled = !selectable || !item.key;" in script
+    assert ".filter((item) => !isDownloaded(item) && item.key)" in script

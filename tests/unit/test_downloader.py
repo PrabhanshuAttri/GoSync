@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from gosync.constants import DEFAULT_TEMP_ZIP
 from gosync.downloader import (
     build_size_batches,
     format_media_for_log,
@@ -131,6 +132,53 @@ def test_process_pipeline_uses_full_manifest_for_auto_batch_cap(
     )
 
     assert downloaded_batches == [["B", "C", "D"]]
+
+
+def test_process_pipeline_passes_data_dir_temp_zip_to_download_batch(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "clip.mp4", 10)
+    state_file = tmp_path / "state.json"
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[item],
+            duplicates=[],
+            matching_entries=1,
+            media_responses=[],
+        ),
+    )
+    fake_session = object()
+    download_calls = []
+
+    def fake_download_batch(
+        session,
+        batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+    ):
+        download_calls.append((session, batch, temp_zip))
+        with zipfile.ZipFile(temp_zip, "w"):
+            pass
+
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: fake_session)
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+    monkeypatch.setattr("gosync.downloader.organize_extracted_media", lambda *_: None)
+
+    process_pipeline(
+        media_items=[item],
+        data_dir=tmp_path,
+        output_dir=tmp_path / "downloads",
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+    )
+
+    assert download_calls == [(fake_session, ["A"], tmp_path / DEFAULT_TEMP_ZIP)]
 
 
 def test_process_pipeline_counts_progress_for_active_items_only(
