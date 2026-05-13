@@ -88,6 +88,8 @@
       : "";
   };
 
+  const isDownloaded = (item) => item.status === "downloaded";
+
   const syncExtensionFilterOptions = () => {
     const selected = extensionFilter.value || requestedExtensionFilter;
     const extensions = Array.from(
@@ -212,15 +214,19 @@
       const size = document.createElement("td");
       const statusCell = document.createElement("td");
       const status = document.createElement("span");
-      const selectable = item.status !== "downloaded";
+      const downloaded = isDownloaded(item);
+      const selectable = !downloaded;
 
       checkbox.type = "checkbox";
       checkbox.name = "selected_media_keys";
       checkbox.value = item.key || "";
-      checkbox.checked = selectedMediaKeys?.has(item.key) || false;
+      checkbox.checked = downloaded || selectedMediaKeys?.has(item.key) || false;
       checkbox.disabled = !selectable || !item.key;
       checkbox.setAttribute("form", "start-form");
-      checkbox.setAttribute("aria-label", `Select ${item.filename}`);
+      checkbox.setAttribute(
+        "aria-label",
+        downloaded ? `${item.filename} already downloaded` : `Select ${item.filename}`
+      );
       checkbox.addEventListener("change", () => {
         if (!selectedMediaKeys) selectedMediaKeys = new Set();
         if (checkbox.checked) {
@@ -308,11 +314,15 @@
       if (selectedMediaKeys === null) {
         selectedMediaKeys = new Set(
           sidecarItems
-            .filter((item) => item.status !== "downloaded" && item.key)
+            .filter((item) => !isDownloaded(item) && item.key)
             .map((item) => item.key)
         );
       } else {
-        const validKeys = new Set(sidecarItems.map((item) => item.key).filter(Boolean));
+        const validKeys = new Set(
+          sidecarItems
+            .filter((item) => !isDownloaded(item) && item.key)
+            .map((item) => item.key)
+        );
         selectedMediaKeys = new Set(
           Array.from(selectedMediaKeys).filter((key) => validKeys.has(key))
         );

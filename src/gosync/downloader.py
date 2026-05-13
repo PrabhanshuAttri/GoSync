@@ -69,8 +69,11 @@ def format_size_mib(size_bytes: int | None) -> str:
 
 def format_media_for_log(item: MediaItem) -> str:
     # Skip JSON files in log messages
-    if item.filename.lower().endswith('.json'):
-        return f"{item.filename} ({item.media_id}, {format_size_mib(item.file_size)}) [SKIPPED]"
+    if item.filename.lower().endswith(".json"):
+        return (
+            f"{item.filename} ({item.media_id}, "
+            f"{format_size_mib(item.file_size)}) [SKIPPED]"
+        )
     return f"{item.filename} ({item.media_id}, {format_size_mib(item.file_size)})"
 
 
@@ -375,10 +378,14 @@ def process_pipeline(
     batch_cap_media_items: list[MediaItem] | None = None,
     job_id: str | None = None,
 ) -> None:
+    session = create_session()
+    temp_zip = data_dir / DEFAULT_TEMP_ZIP
 
     # Filter out JSON files
-    filtered_media_items = [item for item in media_items if not item.filename.lower().endswith('.json')]
-    
+    filtered_media_items = [
+        item for item in media_items if not item.filename.lower().endswith(".json")
+    ]
+
     state_keys = pending_keys(mark_downloaded(state_file, []))
     pending_items = [item for item in filtered_media_items if item.key in state_keys]
     completed_count = len(filtered_media_items) - len(pending_items)
@@ -393,7 +400,10 @@ def process_pipeline(
         )
 
     if not pending_items:
-        message = f"All {len(filtered_media_items)} media files have already been downloaded."
+        message = (
+            f"All {len(filtered_media_items)} media files have already "
+            "been downloaded."
+        )
         if progress:
             progress.log(message, job_id_guard=job_id)
         else:
