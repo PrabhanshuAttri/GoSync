@@ -55,3 +55,13 @@ def test_media_table_checks_and_disables_downloaded_rows() -> None:
     )
     assert "checkbox.disabled = !selectable || !item.key;" in script
     assert ".filter((item) => !isDownloaded(item) && item.key)" in script
+
+
+def test_media_table_status_sort_order_prioritizes_active_rows() -> None:
+    script = MEDIA_TABLE_JS.read_text(encoding="utf-8")
+
+    downloading_rank = script.index('if (status === "downloading") return 0;')
+    pending_rank = script.index('if (status === "pending") return 1;')
+    downloaded_rank = script.index('if (status === "downloaded") return 2;')
+
+    assert downloading_rank < pending_rank < downloaded_rank

@@ -181,7 +181,7 @@ def test_process_pipeline_passes_data_dir_temp_zip_to_download_batch(
     assert download_calls == [(fake_session, ["A"], tmp_path / DEFAULT_TEMP_ZIP)]
 
 
-def test_process_pipeline_counts_progress_for_active_items_only(
+def test_process_pipeline_counts_progress_against_full_manifest(
     tmp_path: Path,
     make_media_item,
     monkeypatch,
@@ -224,13 +224,69 @@ def test_process_pipeline_counts_progress_for_active_items_only(
         headers={},
         batch_max_bytes="auto",
         progress=progress,
+        progress_media_items=[already_done, selected],
         job_id="job-1",
     )
 
     snapshot = progress.snapshot()
-    assert snapshot["total_ids"] == 1
-    assert snapshot["completed_ids"] == 1
+    assert snapshot["total_ids"] == 2
+    assert snapshot["completed_ids"] == 2
     assert snapshot["pending_ids"] == 0
+
+
+def test_process_pipeline_keeps_activity_message_to_batch_summary(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    items = [
+        make_media_item("A", "first.mp4", 10),
+        make_media_item("B", "second.mp4", 10),
+    ]
+    state_file = tmp_path / "state.json"
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=items,
+            duplicates=[],
+            matching_entries=1,
+            media_responses=[],
+        ),
+    )
+    progress = ProgressState(job_id="job-1")
+
+    def fake_download_batch(
+        _session,
+        _batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+    ):
+        with zipfile.ZipFile(temp_zip, "w"):
+            pass
+
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+    monkeypatch.setattr("gosync.downloader.organize_extracted_media", lambda *_: None)
+
+    process_pipeline(
+        media_items=items,
+        data_dir=tmp_path,
+        output_dir=tmp_path / "downloads",
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+        progress=progress,
+        job_id="job-1",
+    )
+
+    snapshot = progress.snapshot()
+    event_log = "\n".join(snapshot["events"])
+    assert "Processing batch 1 of 2: 1 file." in event_log
+    assert "Files in batch:\n  - first.mp4" in event_log
+    assert "Files in batch" not in snapshot["message"]
+    assert "first.mp4" not in snapshot["message"]
 
 
 def test_size_batches_put_unknown_size_items_in_single_item_batches(

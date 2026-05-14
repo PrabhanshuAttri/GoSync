@@ -477,6 +477,7 @@ button:disabled {
   padding: 18px;
   display: grid;
   align-content: space-between;
+  container-type: inline-size;
 }
 
 .metric span {
@@ -487,10 +488,15 @@ button:disabled {
 .metric strong {
   display: block;
   margin-top: 4px;
-  font-size: 1.625rem;
+  font-size: clamp(0.625rem, 9cqw, 1.75rem);
   line-height: 1.1;
   letter-spacing: 0;
-  overflow-wrap: anywhere;
+  max-width: 100%;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: normal;
+  text-overflow: clip;
+  white-space: nowrap;
 }
 
 .metric strong.compact {
@@ -588,6 +594,7 @@ button:disabled {
   background: var(--surface-strong);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  container-type: inline-size;
 }
 
 .transfer-icon {
@@ -621,11 +628,16 @@ button:disabled {
 
 .transfer-stat strong {
   min-width: 0;
+  max-width: 100%;
   color: var(--ink);
-  font-size: 1.875rem;
+  font-size: clamp(1.164rem, 11.97cqw, 2.826rem);
   line-height: 1.05;
   letter-spacing: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: normal;
+  text-overflow: clip;
+  white-space: nowrap;
 }
 
 .progress-row {
@@ -927,32 +939,6 @@ button:disabled {
   .workspace {
     grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
     gap: 24px;
-  }
-
-  .split {
-    grid-template-columns: repeat(12, minmax(0, 1fr));
-    align-items: start;
-  }
-
-  .metrics {
-    grid-column: 1 / -1;
-  }
-
-  .split > .panel:nth-child(2) {
-    grid-column: span 7;
-  }
-
-  .activity {
-    grid-column: span 5;
-    min-height: 100%;
-  }
-
-  #event-log-panel {
-    grid-column: span 5;
-  }
-
-  .sidecar-table-panel {
-    grid-column: span 7;
   }
 
   .log {

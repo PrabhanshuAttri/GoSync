@@ -22,11 +22,7 @@ from gosync.constants import (
 from gosync.manifest import MediaItem
 from gosync.paths import media_download_path, safe_child_path
 from gosync.progress import ProgressState
-from gosync.state import (
-    mark_downloaded,
-    mark_failed,
-    pending_keys,
-)
+from gosync.state import mark_downloaded, mark_failed, pending_keys
 
 try:
     from tqdm import tqdm
@@ -376,25 +372,34 @@ def process_pipeline(
     progress: ProgressState | None = None,
     batch_file_limit: str | int | None = None,
     batch_cap_media_items: list[MediaItem] | None = None,
+    progress_media_items: list[MediaItem] | None = None,
     job_id: str | None = None,
 ) -> None:
     session = create_session()
     temp_zip = data_dir / DEFAULT_TEMP_ZIP
+    progress_items = progress_media_items or media_items
 
     # Filter out JSON files
     filtered_media_items = [
         item for item in media_items if not item.filename.lower().endswith(".json")
     ]
+    filtered_progress_items = [
+        item for item in progress_items if not item.filename.lower().endswith(".json")
+    ]
 
-    state_keys = pending_keys(mark_downloaded(state_file, []))
+    state = mark_downloaded(state_file, [])
+    state_keys = pending_keys(state)
     pending_items = [item for item in filtered_media_items if item.key in state_keys]
-    completed_count = len(filtered_media_items) - len(pending_items)
+    completed_count = completed_count_for_items(
+        state,
+        filtered_progress_items,
+    )
     if progress:
         progress.update(
             job_id_guard=job_id,
-            total_ids=len(filtered_media_items),
+            total_ids=len(filtered_progress_items),
             completed_ids=completed_count,
-            pending_ids=len(pending_items),
+            pending_ids=max(len(filtered_progress_items) - completed_count, 0),
             output_dir=str(output_dir),
             failed_batches=0,
         )
@@ -464,9 +469,12 @@ def process_pipeline(
         batch_file_list = "\n".join(
             f"  - {format_media_for_log(item)}" for item in batch
         )
-        message = (
-            f"Processing batch {batch_index} ({len(batch)} "
-            f"{pluralize(len(batch), 'file')})\nFiles in batch:\n{batch_file_list}"
+        batch_summary = (
+            f"Processing batch {batch_index} of {total_batches}: {len(batch)} "
+            f"{pluralize(len(batch), 'file')}."
+        )
+        detailed_batch_message = (
+            f"{batch_summary}\nFiles in batch:\n{batch_file_list}"
         )
         if progress:
             progress.update(
@@ -481,9 +489,10 @@ def process_pipeline(
                 current_download_speed_bps=0,
                 current_download_elapsed_seconds=0,
             )
-            progress.log(message, job_id_guard=job_id)
+            progress.log(batch_summary, job_id_guard=job_id)
+            progress.log_background(detailed_batch_message, job_id_guard=job_id)
         else:
-            print(f"\n{message}", flush=True)
+            print(f"\n{detailed_batch_message}", flush=True)
 
         try:
             download_batch(session, batch_ids, temp_zip, headers, progress, job_id)
@@ -515,7 +524,10 @@ def process_pipeline(
 
             temp_zip.unlink(missing_ok=True)
             state = mark_downloaded(state_file, batch_keys)
-            completed_count = completed_count_for_items(state, media_items)
+            completed_count = completed_count_for_items(
+                state,
+                filtered_progress_items,
+            )
             downloaded_list = "\n".join(
                 f"  - {format_media_for_log(item)}" for item in batch
             )
@@ -523,7 +535,7 @@ def process_pipeline(
                 progress.update(
                     job_id_guard=job_id,
                     completed_ids=completed_count,
-                    pending_ids=max(len(media_items) - completed_count, 0),
+                    pending_ids=max(len(filtered_progress_items) - completed_count, 0),
                     current_download_bytes=0,
                     current_download_total=0,
                     current_download_started_at=0,

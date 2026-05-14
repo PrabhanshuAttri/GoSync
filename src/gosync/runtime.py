@@ -281,12 +281,12 @@ def run_download_job(
         )
         state = prepared.state
         sync_changes = prepared.sync_changes
-        selected_completed_count = completed_count_for_items(state, media_items)
+        completed_count = completed_count_for_items(state, manifest.media)
         progress.update(
             job_id_guard=active_job_id,
-            total_ids=len(media_items),
-            completed_ids=selected_completed_count,
-            pending_ids=max(len(media_items) - selected_completed_count, 0),
+            total_ids=len(manifest.media),
+            completed_ids=completed_count,
+            pending_ids=max(len(manifest.media) - completed_count, 0),
             sidecar_status="pending",
             sidecar_count=0,
             sidecar_dir=str(paths.output_dir),
@@ -308,6 +308,7 @@ def run_download_job(
             progress=progress,
             batch_file_limit=batch_file_limit,
             batch_cap_media_items=manifest.media,
+            progress_media_items=manifest.media,
             job_id=active_job_id,
         )
         final_state = load_state(state_file)

@@ -122,8 +122,9 @@
 
   const statusRank = (status) => {
     if (status === "downloading") return 0;
-    if (status === "downloaded") return 1;
-    return 2;
+    if (status === "pending") return 1;
+    if (status === "downloaded") return 2;
+    return 3;
   };
 
   const fileSizeValue = (item) => {
