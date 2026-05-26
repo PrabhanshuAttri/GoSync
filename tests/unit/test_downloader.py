@@ -181,7 +181,7 @@ def test_process_pipeline_passes_data_dir_temp_zip_to_download_batch(
     assert download_calls == [(fake_session, ["A"], tmp_path / DEFAULT_TEMP_ZIP)]
 
 
-def test_process_pipeline_counts_progress_for_active_items_only(
+def test_process_pipeline_counts_progress_against_full_manifest(
     tmp_path: Path,
     make_media_item,
     monkeypatch,
@@ -224,13 +224,203 @@ def test_process_pipeline_counts_progress_for_active_items_only(
         headers={},
         batch_max_bytes="auto",
         progress=progress,
+        progress_media_items=[already_done, selected],
         job_id="job-1",
     )
 
     snapshot = progress.snapshot()
-    assert snapshot["total_ids"] == 1
-    assert snapshot["completed_ids"] == 1
+    assert snapshot["total_ids"] == 2
+    assert snapshot["completed_ids"] == 2
     assert snapshot["pending_ids"] == 0
+
+
+def test_single_file_completed_event_is_emitted_after_state_update(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "clip.mp4", 10)
+    state_file = tmp_path / "state.json"
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[item],
+            duplicates=[],
+            matching_entries=1,
+            media_responses=[],
+        ),
+    )
+    progress = ProgressState(job_id="job-1")
+
+    def fake_download_batch(
+        _session,
+        _batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+        **_kwargs,
+    ):
+        with zipfile.ZipFile(temp_zip, "w"):
+            pass
+
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+    monkeypatch.setattr("gosync.downloader.organize_extracted_media", lambda *_: None)
+
+    process_pipeline(
+        media_items=[item],
+        data_dir=tmp_path,
+        output_dir=tmp_path / "downloads",
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+        progress=progress,
+        job_id="job-1",
+    )
+
+    events = progress.snapshot()["events"]
+    completed_indexes = [
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "download.file.completed"
+    ]
+    batch_completed_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "download.batch.completed"
+    )
+
+    assert completed_indexes == [batch_completed_index + 1]
+
+
+def test_single_file_completed_event_is_not_emitted_when_extraction_fails(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "clip.mp4", 10)
+    state_file = tmp_path / "state.json"
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[item],
+            duplicates=[],
+            matching_entries=1,
+            media_responses=[],
+        ),
+    )
+    progress = ProgressState(job_id="job-1")
+
+    def fake_download_batch(
+        _session,
+        _batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+        **_kwargs,
+    ):
+        with zipfile.ZipFile(temp_zip, "w"):
+            pass
+
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+    monkeypatch.setattr(
+        "gosync.downloader.organize_extracted_media",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("extract failed")),
+    )
+
+    process_pipeline(
+        media_items=[item],
+        data_dir=tmp_path,
+        output_dir=tmp_path / "downloads",
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+        progress=progress,
+        job_id="job-1",
+    )
+
+    assert not any(
+        event["event"] == "download.file.completed"
+        for event in progress.snapshot()["events"]
+    )
+
+
+def test_process_pipeline_keeps_activity_message_to_batch_summary(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    items = [
+        make_media_item("A", "first.mp4", 10),
+        make_media_item("B", "second.mp4", 10),
+    ]
+    state_file = tmp_path / "state.json"
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=items,
+            duplicates=[],
+            matching_entries=1,
+            media_responses=[],
+        ),
+    )
+    progress = ProgressState(job_id="job-1")
+
+    def fake_download_batch(
+        _session,
+        _batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+    ):
+        with zipfile.ZipFile(temp_zip, "w"):
+            pass
+
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+    monkeypatch.setattr("gosync.downloader.organize_extracted_media", lambda *_: None)
+
+    process_pipeline(
+        media_items=items,
+        data_dir=tmp_path,
+        output_dir=tmp_path / "downloads",
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+        progress=progress,
+        job_id="job-1",
+    )
+
+    snapshot = progress.snapshot()
+    assert any(
+        event["event"] == "download.batch.started"
+        and event["batch_total"] == 2
+        and event["files_in_batch"] == 1
+        and event["files"][0]["file_name"] == "first.mp4"
+        and event["files"][0]["file_size_human"] == "10.00 B"
+        and event["detail_lines"] == ["first.mp4 · 10.00 B"]
+        for event in snapshot["events"]
+    )
+    assert sum(
+        1
+        for event in snapshot["events"]
+        if event["event"] == "download.batch.started"
+        and event["batch_index"] == 1
+    ) == 1
+    assert any(
+        event["level"] == "active"
+        and event["title"] == "Extracting batch 1 of 2"
+        and event["message"] == "1 file ready to unpack."
+        for event in snapshot["events"]
+    )
+    assert "Files in batch" not in snapshot["message"]
+    assert "first.mp4" not in snapshot["message"]
+    assert snapshot["state_label"] == "Completed"
+    assert snapshot["message"] == "Batch 2 of 2 complete: 1 file downloaded."
 
 
 def test_size_batches_put_unknown_size_items_in_single_item_batches(

@@ -1,13 +1,15 @@
 # GoSync
 
-GoSync is a self-hosted Docker utility for downloading a GoPro cloud media
-library when the official bulk download flow is too limited for large
+GoSync is a self-hosted Python and Docker utility for downloading a GoPro cloud
+media library when the official bulk download flow is too limited for large
 collections.
 
 GoPro Cloud limits bulk downloads to 25 items at a time. GoSync works around
 that by reading media metadata and session headers from a browser HAR export,
 calling the GoPro download API directly, downloading in safe resumable batches,
 and writing downloaded media plus XMP sidecars into a mounted data directory.
+The web dashboard shows concise run status, grouped event history, transfer
+progress, and expandable batch details with each file and size.
 
 This project was inspired by
 [josefkeup741/gopro-cloud-rescue](https://github.com/josefkeup741/gopro-cloud-rescue).
@@ -22,6 +24,7 @@ download need.
 ## Requirements
 
 - Docker or Docker Compose
+- Python 3.12+ for direct local development or CLI runs
 - A HAR file exported from your logged-in GoPro media library
 - Enough free disk space in the mounted data directory for the downloaded media
 
@@ -56,7 +59,7 @@ Plain Docker also works:
 docker run --rm \
   -p 8080:8080 \
   -v "$PWD/data:/data" \
-  ghcr.io/prabhanshuattri/gosync:1.1.2
+  ghcr.io/prabhanshuattri/gosync:1.2.0
 ```
 
 Then open `http://localhost:8080`.
@@ -80,6 +83,8 @@ make sure the Network export includes request headers such as `Cookie` or
 
 ## Documentation
 
+- [Project overview](docs/project-overview.md): architecture, runtime
+  components, and data flow.
 - [Usage guide](docs/usage.md): web UI workflow, resume behavior, data directory
   layout, and environment configuration.
 - [XMP sidecar processing](docs/sidecars.md): sidecar field selection and
