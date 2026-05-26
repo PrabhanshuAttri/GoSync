@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from gosync import web
+from gosync.events import RECENT_EVENTS, log_event
 from gosync.progress import ProgressState
 
 
@@ -35,6 +36,7 @@ def web_args(tmp_path: Path) -> SimpleNamespace:
 
 def reset_web_state(monkeypatch) -> None:
     FakeThread.instances = []
+    RECENT_EVENTS.clear()
     monkeypatch.setattr(web.threading, "Thread", FakeThread)
     monkeypatch.setattr(web, "PROGRESS", ProgressState())
     monkeypatch.setattr(web, "JOB_THREAD", None)
@@ -107,7 +109,86 @@ def test_start_rejects_empty_media_selection(
 
     assert response.status_code == 302
     assert FakeThread.instances == []
-    assert "Select at least one pending media file" in web.PROGRESS.message
+    assert web.PROGRESS.message == "No pending media selected"
+    assert web.PROGRESS.snapshot()["events"][-1]["event"] == "media.selection.empty"
+
+
+def test_start_accepts_compact_all_pending_selection(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har")
+    app = web.create_app(web_args(tmp_path))
+
+    response = app.test_client().post(
+        "/start",
+        data={
+            "har_file": "gopro.com.har",
+            "selected_media_mode": "all_pending",
+        },
+        headers={"X-Requested-With": "fetch"},
+    )
+
+    assert response.status_code == 204
+    download_thread = next(
+        thread
+        for thread in FakeThread.instances
+        if thread.target.__name__ == "run_download_job"
+    )
+    assert download_thread.args[3] == {
+        "ABCDEFGHIJKLM_GX010001.MP4",
+        "NOPQRSTUVWXYZ_GX010002.JPG",
+        "UNNAMEDMEDIA1_unnamed_1.MP4",
+    }
+
+
+def test_start_fetch_request_updates_without_redirect(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har")
+    app = web.create_app(web_args(tmp_path))
+
+    response = app.test_client().post(
+        "/start",
+        data={
+            "har_file": "gopro.com.har",
+            "selected_media_keys": ["ABCDEFGHIJKLM_GX010001.MP4"],
+        },
+        headers={"X-Requested-With": "fetch"},
+    )
+
+    assert response.status_code == 204
+    assert response.location is None
+    assert any(
+        thread.target.__name__ == "run_download_job"
+        for thread in FakeThread.instances
+    )
+    snapshot = web.PROGRESS.snapshot()
+    assert snapshot["status"] == "running"
+    assert snapshot["state_label"] == "Starting"
+    assert snapshot["message"] == "Preparing the selected download job."
+    assert snapshot["total_ids"] == 3
+
+
+def test_stop_fetch_request_updates_without_redirect(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    app = web.create_app(web_args(tmp_path))
+
+    response = app.test_client().post(
+        "/stop",
+        headers={"X-Requested-With": "fetch"},
+    )
+
+    assert response.status_code == 204
+    assert response.location is None
 
 
 def test_sidecars_endpoint_includes_media_file_size(
@@ -182,3 +263,23 @@ def test_upload_does_not_mutate_shared_args_har_file(
 
     assert response.status_code == 302
     assert args.har_file is None
+
+
+def test_current_events_endpoint_filters_to_current_job(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    web.PROGRESS.update(job_id="current")
+    app = web.create_app(web_args(tmp_path))
+
+    log_event("download.phase.started", "Old run", run_id="old")
+    log_event("download.phase.started", "Current run", run_id="current")
+    log_event("app.ready", "Startup event")
+
+    response = app.test_client().get("/api/runs/current/events")
+
+    assert response.status_code == 200
+    assert [event["message"] for event in response.get_json()["items"]] == [
+        "Current run"
+    ]

@@ -169,6 +169,12 @@
     });
   };
 
+  const pendingKeys = () => (
+    sidecarItems
+      .filter((item) => !isDownloaded(item) && item.key)
+      .map((item) => item.key)
+  );
+
   const updateSelectionSummary = () => {
     const selectedCount = selectedMediaKeys ? selectedMediaKeys.size : 0;
     const pendingCount = sidecarItems.filter(
@@ -305,6 +311,24 @@
   });
 
   window.gosyncMediaTable = {
+    startFormData(form) {
+      saveSettings();
+      const formData = new FormData(form);
+      const validPendingKeys = pendingKeys();
+      const validPendingKeySet = new Set(validPendingKeys);
+      const selectedKeys = selectedMediaKeys
+        ? Array.from(selectedMediaKeys).filter((key) => validPendingKeySet.has(key))
+        : validPendingKeys;
+
+      formData.delete("selected_media_keys");
+      formData.delete("selected_media_mode");
+      if (selectedKeys.length && selectedKeys.length === validPendingKeys.length) {
+        formData.set("selected_media_mode", "all_pending");
+      } else {
+        selectedKeys.forEach((key) => formData.append("selected_media_keys", key));
+      }
+      return formData;
+    },
     setItems(items) {
       const nextSignature = itemsSignature(items);
       if (nextSignature === lastItemsSignature) {

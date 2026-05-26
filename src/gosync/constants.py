@@ -34,14 +34,12 @@ SKIPPED_HAR_HEADERS = {
     "host",
 }
 
-STATUS_IDLE = "idle"
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
 STATUS_DOWNLOADED = "downloaded"
 STATUS_COMPLETE = "complete"
 STATUS_FAILED = "failed"
 STATUS_STOPPED = "stopped"
-STATUS_SKIPPED = "skipped"
 
 MAX_SINGLE_FILE_RETRIES = 3
 

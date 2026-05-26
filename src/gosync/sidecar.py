@@ -219,6 +219,15 @@ def run_sidecar_job(
                 sidecar_message=message,
             )
             LOGGER.info(message)
+            progress.emit_event(
+                "sidecar.generation.started",
+                "Generating XMP sidecar files",
+                level="ACTIVE",
+                phase="sidecars",
+                job_id_guard=job_id,
+                set_message=False,
+                destination=str(output_dir),
+            )
             progress.notify(
                 "info",
                 "XMP sidecars",
@@ -253,6 +262,18 @@ def run_sidecar_job(
                 sidecar_message=message,
             )
             LOGGER.info(message)
+            progress.emit_event(
+                "sidecar.generation.completed",
+                message,
+                level="SUCCESS",
+                phase="sidecars",
+                job_id_guard=job_id,
+                set_message=False,
+                sidecar_count=written,
+                written_count=written,
+                destination=str(output_dir),
+                matching_entries=matching_entries,
+            )
             progress.notify(
                 "success",
                 "XMP sidecars complete",
@@ -276,6 +297,17 @@ def run_sidecar_job(
                 sidecar_message=message,
             )
             LOGGER.exception("XMP sidecar generation failed.")
+            progress.emit_event(
+                "sidecar.generation.failed",
+                message,
+                level="ERROR",
+                phase="sidecars",
+                job_id_guard=job_id,
+                set_message=False,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                destination=str(output_dir),
+            )
             progress.notify(
                 "error",
                 "XMP sidecars failed",

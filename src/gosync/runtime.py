@@ -2,7 +2,6 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
 
 from gosync.config import resolve_inside_data_dir
 from gosync.constants import (
@@ -18,19 +17,22 @@ from gosync.downloader import (
     process_pipeline,
     resolve_har_file,
 )
+from gosync.events import log_event, new_run_id
 from gosync.logging_config import LOGGER, configure_file_logging
 from gosync.manifest import (
     MediaManifest,
+    extension_counts,
     format_extension_summary,
     read_manifest_from_har,
     write_manifest,
     write_media_responses_dump,
 )
 from gosync.progress import ProgressState
-from gosync.report import build_run_summary, write_run_report
+from gosync.report import build_run_summary, build_run_summary_event, write_run_report
 from gosync.sidecar import run_sidecar_job
 from gosync.state import (
     create_or_update_state,
+    downloaded_extension_counts,
     format_downloaded_extension_summary,
     load_state,
     sync_state_with_downloads,
@@ -98,16 +100,65 @@ def prepare_manifest_state(
     create_or_update_state(state_file, manifest)
     state, sync_changes = sync_state_with_downloads(state_file, output_dir)
     if progress:
-        progress.log_background(format_manifest_state_summary(manifest, state))
+        counts = {
+            key.upper(): value for key, value in extension_counts(manifest).items()
+        }
+        progress.emit_event(
+            "media.scan.completed",
+            "Media scan completed",
+            phase="scan",
+            job_id_guard=progress.job_id,
+            set_message=False,
+            counts_by_extension=counts,
+            total_count=len(manifest.media),
+        )
+        downloaded_counts = {
+            key.upper(): value
+            for key, value in downloaded_extension_counts(state).items()
+        }
+        progress.emit_event(
+            "media.scan.completed",
+            "Already downloaded files detected",
+            phase="scan",
+            job_id_guard=progress.job_id,
+            set_message=False,
+            already_downloaded_count=sum(downloaded_counts.values()),
+            already_downloaded_by_extension=downloaded_counts,
+            cli_message=(
+                "Already downloaded: "
+                f"{sum(downloaded_counts.values()):,} files"
+                + (
+                    ", "
+                    + ", ".join(
+                        f"{extension} {count:,}"
+                        for extension, count in downloaded_counts.items()
+                    )
+                    if downloaded_counts
+                    else ""
+                )
+            ),
+        )
         for duplicate in manifest.duplicates:
-            progress.log_background(
-                "Skipped duplicate media entry: "
-                f"{duplicate.filename} ({duplicate.media_id})"
+            progress.emit_event(
+                "download.file.skipped",
+                "Duplicate media entry skipped",
+                level="WARNING",
+                phase="scan",
+                job_id_guard=progress.job_id,
+                set_message=False,
+                file_name=duplicate.filename,
+                file_id=duplicate.media_id,
             )
         for change in sync_changes:
-            progress.log_background(
-                "Resume sync: "
-                f"{change['filename']} ({change['id']}) marked {change['status']}."
+            progress.emit_event(
+                "media.scan.completed",
+                "Resume state synchronized",
+                phase="scan",
+                job_id_guard=progress.job_id,
+                set_message=False,
+                file_name=change["filename"],
+                file_id=change["id"],
+                status=change["status"],
             )
 
     return manifest, state, sync_changes
@@ -146,29 +197,23 @@ def format_manifest_state_summary(manifest: MediaManifest, state: dict) -> str:
     )
 
 
-def startup_media_summaries(args: argparse.Namespace) -> list[str]:
-    try:
-        prepared = prepare_runtime_manifest_state(args)
-    except Exception as exc:
-        LOGGER.warning("Failed to prepare startup media summaries: %s", exc)
-        return []
-    return [format_manifest_state_summary(prepared.manifest, prepared.state)]
-
-
 def run_once(args: argparse.Namespace) -> int:
     prepared = prepare_runtime_manifest_state(args)
     paths = prepared.paths
     log_file = configure_file_logging(paths.data_dir)
 
-    print("========================================", flush=True)
-    print("             GoSync Utility             ", flush=True)
-    print("========================================", flush=True)
-    print(f"Data directory: {paths.data_dir}", flush=True)
-    print(f"HAR file: {paths.har_path}", flush=True)
-    print(f"Output folder: {paths.output_dir}", flush=True)
-    print(f"Sidecars: next to media files in {paths.output_dir}", flush=True)
-    print(f"State file: {paths.state_file}", flush=True)
-    print(f"Batch max bytes: {args.batch_max_bytes}", flush=True)
+    run_id = new_run_id()
+    log_event(
+        "app.starting",
+        "GoSync run started",
+        run_id=run_id,
+        data_dir=str(paths.data_dir),
+        har_file=paths.har_path.name,
+        destination=str(paths.output_dir),
+        state_file=str(paths.state_file),
+        batch_max_bytes=args.batch_max_bytes,
+        cli_message=f"GoSync run started with HAR file {paths.har_path.name}",
+    )
     LOGGER.info("File logging enabled at %s", log_file)
     LOGGER.info(
         "Starting run-once download. data_dir=%s har_file=%s output_dir=%s "
@@ -181,8 +226,18 @@ def run_once(args: argparse.Namespace) -> int:
     )
 
     manifest = prepared.manifest
-    print(format_extension_summary(prepared.manifest), flush=True)
-    print(format_downloaded_extension_summary(prepared.state), flush=True)
+    log_event(
+        "media.scan.completed",
+        "Media scan completed",
+        level="INFO",
+        phase="scan",
+        run_id=run_id,
+        counts_by_extension={
+            key.upper(): value
+            for key, value in extension_counts(prepared.manifest).items()
+        },
+        total_count=len(prepared.manifest.media),
+    )
     headers = extract_browser_headers(paths.har_path)
     try:
         run_sidecar_job(
@@ -209,17 +264,21 @@ def run_once(args: argparse.Namespace) -> int:
         STATUS_COMPLETE,
         prepared.sync_changes,
     )
-    print(
-        build_run_summary(
+    log_event(
+        "run.cleanup.completed",
+        "Run completed",
+        phase="cleanup",
+        run_id=run_id,
+        destination=str(paths.output_dir),
+        report_path=str(report_path),
+        cli_message=build_run_summary(
             final_state,
             manifest,
             STATUS_COMPLETE,
             prepared.sync_changes,
             report_path,
         ),
-        flush=True,
     )
-    print(f"Run report: {report_path}", flush=True)
     LOGGER.info("Run-once download completed.")
     return 0
 
@@ -238,21 +297,18 @@ def run_download_job(
     state_file: Path | None = None
     active_job_id = job_id or ""
     try:
-        active_job_id = active_job_id or uuid4().hex
+        active_job_id = active_job_id or new_run_id()
         paths = get_runtime_paths(args, har_file)
         data_dir = paths.data_dir
         state_file = paths.state_file
         progress.update(
             status="running",
-            state_label="Processing",
+            state_label="Starting",
             job_id=active_job_id,
             stop_requested=False,
             started_at=datetime.now().isoformat(timespec="seconds"),
             finished_at="",
             report_path="",
-            total_ids=0,
-            completed_ids=0,
-            pending_ids=0,
             total_batches=0,
             completed_batches=0,
             failed_batches=0,
@@ -268,12 +324,26 @@ def run_download_job(
             sidecar_dir=str(paths.output_dir),
             har_file=str(paths.har_path),
         )
-        progress.log(
-            f"Scanning HAR file: {paths.har_path.name}",
+        progress.emit_event(
+            "har.scan.started",
+            "Scanning HAR file",
+            phase="auth",
             job_id_guard=active_job_id,
+            har_file=paths.har_path.name,
         )
         prepared = prepare_paths_manifest_state(paths)
         manifest = prepared.manifest
+        progress.emit_event(
+            "media.scan.completed",
+            "Media scan completed",
+            phase="scan",
+            job_id_guard=active_job_id,
+            set_message=False,
+            counts_by_extension={
+                key.upper(): value for key, value in extension_counts(manifest).items()
+            },
+            total_count=len(manifest.media),
+        )
         media_items = (
             [item for item in manifest.media if item.key in selected_keys]
             if selected_keys is not None
@@ -293,11 +363,15 @@ def run_download_job(
             sidecar_message="XMP sidecar generation queued.",
         )
         if selected_keys is not None:
-            progress.log(
-                f"Selected {len(media_items)} media files for download.",
+            progress.emit_event(
+                "media.selection.completed",
+                "Media selection completed",
+                phase="selection",
                 job_id_guard=active_job_id,
+                selected_count=len(media_items),
+                cli_message=f"Selected {len(media_items):,} media files for download.",
             )
-        headers = extract_browser_headers(paths.har_path)
+        headers = extract_browser_headers(paths.har_path, progress, active_job_id)
         process_pipeline(
             media_items=media_items,
             data_dir=paths.data_dir,
@@ -331,15 +405,24 @@ def run_download_job(
             current_download_total=0,
             report_path=str(report_path),
         )
-        progress.log_background(
-            build_run_summary(
-                final_state,
-                manifest,
-                STATUS_COMPLETE,
-                sync_changes,
-                report_path,
-            ),
+        summary_title, summary_details = build_run_summary_event(
+            final_state,
+            manifest,
+            STATUS_COMPLETE,
+            sync_changes,
+            report_path,
+        )
+        progress.emit_event(
+            "run.cleanup.completed",
+            summary_title,
+            level="SUCCESS",
+            phase="cleanup",
+            title=summary_title,
+            details=summary_details,
             job_id_guard=active_job_id,
+            set_message=False,
+            summary=summary_title,
+            report_path=str(report_path),
         )
     except DownloadCancelled:
         report_path = ""
@@ -372,21 +455,33 @@ def run_download_job(
             report_path=report_path,
         )
         if final_state and manifest:
-            progress.log_background(
-                build_run_summary(
-                    final_state,
-                    manifest,
-                    STATUS_STOPPED,
-                    sync_changes,
-                    report_path,
-                ),
+            summary_title, summary_details = build_run_summary_event(
+                final_state,
+                manifest,
+                STATUS_STOPPED,
+                sync_changes,
+                report_path,
+            )
+            progress.emit_event(
+                "run.stopped",
+                summary_title,
+                level="WARNING",
+                phase="cleanup",
+                title=summary_title,
+                details=summary_details,
                 job_id_guard=active_job_id,
+                set_message=False,
+                summary=summary_title,
+                report_path=report_path,
             )
         else:
-            progress.log_event(
-                "Download stopped by user.",
-                "Stopped",
+            progress.emit_event(
+                "run.stopped",
+                "Run stopped safely",
+                phase="cleanup",
+                state_label="Stopped",
                 job_id_guard=active_job_id,
+                status="stopped",
             )
     except Exception as exc:
         progress.update(
@@ -397,4 +492,14 @@ def run_download_job(
             stop_requested=False,
         )
         LOGGER.exception("Download job failed.")
-        progress.log(f"Failed: {exc}", job_id_guard=active_job_id)
+        progress.emit_event(
+            "error.unhandled",
+            "Unhandled download error",
+            level="ERROR",
+            phase="download",
+            job_id_guard=active_job_id,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            state_label="Failed",
+            cli_message=f"Download failed: {exc}",
+        )

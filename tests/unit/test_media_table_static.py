@@ -65,3 +65,46 @@ def test_media_table_status_sort_order_prioritizes_active_rows() -> None:
     downloaded_rank = script.index('if (status === "downloaded") return 2;')
 
     assert downloading_rank < pending_rank < downloaded_rank
+
+
+def test_media_table_compacts_all_pending_start_payloads() -> None:
+    script = MEDIA_TABLE_JS.read_text(encoding="utf-8")
+
+    assert 'formData.set("selected_media_mode", "all_pending");' in script
+    assert 'formData.delete("selected_media_keys");' in script
+    assert 'window.gosyncMediaTable.startFormData(form)' in (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "gosync"
+        / "templates"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+
+def test_event_log_uses_grouped_timeline_renderer() -> None:
+    template = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "gosync"
+        / "templates"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'class="event-timeline"' in template
+    assert "const eventGroups = [" in template
+    assert "event.detail_lines" in template
+    assert "event.meta" in template
+
+
+def test_event_log_compacts_progress_updates_in_ui() -> None:
+    template = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "gosync"
+        / "templates"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert "const compactUiEvents = (events) => {" in template
+    assert 'event.event !== "download.file.progress"' in template
+    assert "latestProgressIndexes.get(key) === index" in template

@@ -98,27 +98,32 @@
             <span class="selection-summary" id="selection-summary">No files selected</span>
             <button id="start-button" class="secondary" type="submit" {% if not har_files %}disabled{% endif %}>Start Download</button>
           </form>
-          <form action="/stop" method="post" class="stop-form">
+          <form id="stop-form" action="/stop" method="post" class="stop-form">
             <button id="stop-button" class="danger" type="submit" disabled>Stop Download</button>
           </form>
         </section>
       </aside>
 
       <div class="split">
-        <div class="metrics">
-          <div class="metric">
-            <span>Media Complete</span>
-            <strong id="overall">0%</strong>
+        <section class="panel metrics-card">
+          <div class="metrics-card-header">
+            <div>
+              <h2>Media Complete</h2>
+              <strong id="overall">0%</strong>
+            </div>
+            <span class="downloaded-count" id="downloaded-count">0 / 0 files</span>
           </div>
-          <div class="metric">
-            <span>Downloaded</span>
-            <strong id="downloaded-count">0</strong>
+          <div class="media-progress" aria-label="Downloaded media progress">
+            <div id="media-progress-fill"></div>
           </div>
-          <div class="metric">
+          <div class="metrics-card-meta">
             <span>Batches</span>
             <strong id="batches">0 / 0</strong>
           </div>
-        </div>
+          <div class="format-counts" id="format-counts" aria-label="Media file format counts">
+            <span class="format-empty">No media loaded.</span>
+          </div>
+        </section>
 
         <section class="panel">
           <div class="panel-header">
@@ -172,10 +177,28 @@
           </div>
         </section>
 
-        <section class="panel activity">
-          <h2>Status</h2>
-          <strong id="activity-message">Ready</strong>
-          <p id="activity-detail">Waiting for a download job.</p>
+        <section class="panel activity" id="event-log-panel">
+          <div class="activity-status">
+            <span>Status:</span>
+            <strong id="activity-message">Ready</strong>
+          </div>
+          <div class="event-log-heading">
+            <h3>Events</h3>
+          </div>
+          <div class="event-timeline-wrap" id="event-log-body">
+            <div class="event-timeline" id="events">
+              <div class="event-group info">
+                <div class="event-group-heading">
+                  <span class="event-group-marker" aria-hidden="true"></span>
+                  <strong>Setup</strong>
+                </div>
+                <div class="timeline-event info">
+                  <span class="event-time">--:--:--</span>
+                  <span class="event-title">Ready</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section class="panel sidecar-table-panel">
@@ -217,24 +240,6 @@
           </div>
         </section>
 
-        <section class="panel collapsible collapsed" id="event-log-panel">
-          <div class="panel-header">
-            <button
-              class="collapse-toggle"
-              id="event-log-toggle"
-              type="button"
-              aria-expanded="false"
-              aria-controls="event-log-body"
-            >
-              <span class="collapse-chevron" aria-hidden="true"></span>
-              <span>Event Log</span>
-            </button>
-            <span class="hint">Latest events</span>
-          </div>
-          <div class="collapsible-body" id="event-log-body">
-            <pre class="log" id="events">Ready</pre>
-          </div>
-        </section>
       </div>
     </div>
   </main>
@@ -285,9 +290,6 @@
         setDrawerOpen(false, false);
       }
     });
-    document.querySelector('form[action="/start"]')?.addEventListener("submit", () => {
-      sessionStorage.setItem("gosync-job-started", "true");
-    });
     drawerMedia.addEventListener("change", (event) => {
       if (!event.matches) {
         setDrawerOpen(false, false);
@@ -308,28 +310,10 @@
       applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
     });
 
-    const eventLogPanel = document.getElementById("event-log-panel");
-    const eventLogToggle = document.getElementById("event-log-toggle");
-    const setEventLogCollapsed = (collapsed) => {
-      eventLogPanel.classList.toggle("collapsed", collapsed);
-      eventLogToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
-    };
-    setEventLogCollapsed(true);
-    eventLogToggle.addEventListener("click", () => {
-      setEventLogCollapsed(!eventLogPanel.classList.contains("collapsed"));
-    });
-
     const setWidth = (id, value) => {
       const element = document.getElementById(id);
       element.classList.remove("indeterminate");
       element.style.width = `${Math.max(0, Math.min(100, value || 0))}%`;
-    };
-    const setIndeterminate = (id, active) => {
-      const element = document.getElementById(id);
-      element.classList.toggle("indeterminate", active);
-      if (active) {
-        element.style.width = "";
-      }
     };
     const formatBytes = (bytes) => {
       if (!bytes) return "0 B";
@@ -349,6 +333,277 @@
       const secs = total % 60;
       const two = (value) => String(value).padStart(2, "0");
       return hrs ? `${hrs}:${two(mins)}:${two(secs)}` : `${two(mins)}:${two(secs)}`;
+    };
+    const mediaExtension = (filename) => {
+      const base = String(filename || "").split(/[\\/]/).pop();
+      const index = base.lastIndexOf(".");
+      return index > -1 && index < base.length - 1
+        ? base.slice(index + 1).toLowerCase()
+        : "file";
+    };
+    const formatLabel = (extension) => {
+      if (["jpg", "jpeg", "png", "gpr", "heic"].includes(extension)) return "Images";
+      if (["mp4", "mov", "360", "lrv"].includes(extension)) return "Videos";
+      return extension.toUpperCase();
+    };
+    const formatIconPath = (label) => {
+      if (label === "Images") {
+        return '<path d="M4 5h16v14H4z" /><path d="m4 15 4-4 4 4 3-3 5 5" /><circle cx="15" cy="9" r="1.5" />';
+      }
+      if (label === "Videos") {
+        return '<path d="M4 6h11v12H4z" /><path d="m15 10 5-3v10l-5-3z" />';
+      }
+      return '<path d="M6 3h9l5 5v13H6z" /><path d="M14 3v6h6" />';
+    };
+    const renderFormatCounts = (items) => {
+      const container = document.getElementById("format-counts");
+      const counts = new Map();
+      (items || []).forEach((item) => {
+        const label = formatLabel(mediaExtension(item.filename));
+        counts.set(label, (counts.get(label) || 0) + 1);
+      });
+      container.replaceChildren();
+      if (!counts.size) {
+        const empty = document.createElement("span");
+        empty.className = "format-empty";
+        empty.textContent = "No media loaded.";
+        container.append(empty);
+        return;
+      }
+      Array.from(counts.entries())
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .forEach(([label, count]) => {
+          const item = document.createElement("span");
+          item.className = "format-count";
+          const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+          const text = document.createElement("span");
+          const value = document.createElement("strong");
+          icon.setAttribute("viewBox", "0 0 24 24");
+          icon.setAttribute("aria-hidden", "true");
+          icon.innerHTML = formatIconPath(label);
+          text.textContent = label;
+          value.textContent = count;
+          item.append(icon, text, value);
+          container.append(item);
+        });
+    };
+    const eventIconPath = (kind) => {
+      if (kind === "success") return '<path d="m5 12 4 4L19 6" />';
+      if (kind === "error") return '<path d="M12 8v5" /><path d="M12 17h.01" />';
+      if (kind === "warning") return '<path d="M12 9v4" /><path d="M12 17h.01" />';
+      if (kind === "active") return '<path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" />';
+      return '<path d="M12 8h.01" /><path d="M11 12h1v5h1" />';
+    };
+    const normalizeEvent = (event) => {
+      if (event && typeof event === "object") {
+        const detailLines = Array.isArray(event.detail_lines)
+          ? event.detail_lines
+          : event.details
+            ? String(event.details).split("\n").filter(Boolean)
+            : [];
+        return {
+          id: event.id || "",
+          time: event.time || "--:--:--",
+          level: event.level || "info",
+          group: event.group || "setup",
+          groupLabel: event.group_label || "Setup",
+          summary: event.summary || event.title || event.message || "Event",
+          title: event.title || event.summary || "Event",
+          message: event.message || "",
+          details: event.details || "",
+          detailLines,
+          meta: Array.isArray(event.meta) ? event.meta : [],
+          files: Array.isArray(event.files) ? event.files : [],
+        };
+      }
+      const text = String(event || "").replace(/\\n/g, "\n");
+      const match = text.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*([\s\S]*)$/);
+      const message = match ? match[2] : text || "Ready";
+      const title = message.split("\n", 1)[0] || "Event";
+      const details = message.includes("\n") ? message.slice(title.length + 1) : "";
+      return {
+        id: "",
+        time: match ? match[1] : "--:--:--",
+        level: "info",
+        group: "setup",
+        groupLabel: "Setup",
+        summary: title,
+        title,
+        message: "",
+        details,
+        detailLines: details ? details.split("\n").filter(Boolean) : [],
+        meta: [],
+        files: [],
+      };
+    };
+    const openEventDetails = new Set();
+    const eventKey = (event) =>
+      event.id || `${event.time}-${event.level}-${event.group}-${event.summary}-${event.message}-${event.details}`;
+    const progressEventKey = (event) => {
+      if (event.event !== "download.file.progress") return "";
+      const file = Array.isArray(event.files) && event.files.length ? event.files[0] : {};
+      return [
+        event.event,
+        event.batch_index || "",
+        event.batch_total || "",
+        file.file_id || "",
+        file.file_name || "",
+      ].join(":");
+    };
+    const compactUiEvents = (events) => {
+      const latestProgressIndexes = new Map();
+      events.forEach((event, index) => {
+        const key = progressEventKey(event);
+        if (key) {
+          latestProgressIndexes.set(key, index);
+        }
+      });
+      return events.filter((event, index) => {
+        const key = progressEventKey(event);
+        return !key || latestProgressIndexes.get(key) === index;
+      });
+    };
+    const eventGroups = [
+      ["setup", "Setup"],
+      ["scan", "Media Scan"],
+      ["auth", "Auth"],
+      ["download", "Download"],
+      ["sidecars", "Sidecars"],
+      ["finish", "Finish"],
+    ];
+    const severityRank = { error: 4, warning: 3, active: 2, success: 1, info: 0 };
+    const groupLevel = (events) =>
+      events.reduce(
+        (level, event) => severityRank[event.level] > severityRank[level] ? event.level : level,
+        "info",
+      );
+    const appendText = (parent, className, text) => {
+      const element = document.createElement("span");
+      element.className = className;
+      element.textContent = text;
+      parent.append(element);
+      return element;
+    };
+    const meaningfulEventCopy = (event) => {
+      const summary = String(event.summary || "").trim();
+      const message = String(event.message || "").trim();
+      const title = String(event.title || "").trim();
+      const genericMessages = new Set([
+        "Batch started",
+        "Batch completed",
+        "Batch files listed",
+        "Download progress updated",
+        "Download failed",
+        "Media scan completed",
+        "Browser session reused",
+      ]);
+      if (!message || message === summary || message === title) return "";
+      if (genericMessages.has(message)) return "";
+      return message;
+    };
+    const renderEvents = (eventItems) => {
+      const container = document.getElementById("events");
+      container.replaceChildren();
+      const rows = compactUiEvents(
+        (eventItems && eventItems.length ? eventItems : ["Ready"]).map(normalizeEvent),
+      );
+      const grouped = new Map(eventGroups.map(([key]) => [key, []]));
+      rows.forEach((event) => {
+        if (!grouped.has(event.group)) {
+          grouped.set(event.group, []);
+        }
+        grouped.get(event.group).push(event);
+      });
+      const fallbackLabels = new Map(eventGroups);
+      const groupsByLatestEvent = Array.from(grouped.entries())
+        .filter(([, groupEvents]) => groupEvents.length)
+        .sort(([, leftEvents], [, rightEvents]) => {
+          const leftIndex = rows.lastIndexOf(leftEvents[leftEvents.length - 1]);
+          const rightIndex = rows.lastIndexOf(rightEvents[rightEvents.length - 1]);
+          return rightIndex - leftIndex;
+        });
+      groupsByLatestEvent.forEach(([group, groupEvents]) => {
+        const fallbackLabel = fallbackLabels.get(group) || group;
+        if (!groupEvents.length) return;
+        const level = groupLevel(groupEvents);
+        const section = document.createElement("section");
+        section.className = `event-group ${level}`;
+        const heading = document.createElement("div");
+        heading.className = "event-group-heading";
+        const marker = document.createElement("span");
+        marker.className = "event-group-marker";
+        marker.setAttribute("aria-hidden", "true");
+        const label = document.createElement("strong");
+        label.textContent = groupEvents[0].groupLabel || fallbackLabel;
+        const count = document.createElement("span");
+        count.className = "event-group-count";
+        count.textContent = `${groupEvents.length}`;
+        heading.append(marker, label, count);
+        section.append(heading);
+
+        groupEvents.slice().reverse().forEach((event) => {
+          const key = eventKey(event);
+          const hasDetails = event.detailLines.length > 0 || event.details || event.files.length > 0;
+          const isOpen = hasDetails && openEventDetails.has(key);
+          const item = document.createElement("article");
+          item.className = `timeline-event ${event.level}${hasDetails ? "" : " no-details"}${isOpen ? " open" : ""}`;
+          const icon = document.createElement("span");
+          icon.className = "event-icon";
+          icon.setAttribute("aria-hidden", "true");
+          icon.innerHTML = `<svg viewBox="0 0 24 24">${eventIconPath(event.level)}</svg>`;
+          const time = document.createElement("span");
+          time.className = "event-time";
+          time.textContent = event.time;
+          const content = document.createElement("div");
+          content.className = "event-content";
+          const button = document.createElement("button");
+          button.className = "event-summary";
+          button.type = "button";
+          button.disabled = !hasDetails;
+          button.setAttribute("aria-expanded", isOpen ? "true" : "false");
+          const main = document.createElement("span");
+          main.className = "event-summary-main";
+          appendText(main, "event-title", event.summary);
+          const copyText = meaningfulEventCopy(event);
+          const copy = appendText(main, "event-copy", copyText);
+          copy.hidden = !copyText;
+          const meta = document.createElement("span");
+          meta.className = "event-meta";
+          event.meta.forEach((value) => appendText(meta, "event-chip", value));
+          const chevron = document.createElement("span");
+          chevron.className = "event-chevron";
+          chevron.setAttribute("aria-hidden", "true");
+          chevron.innerHTML = '<svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></svg>';
+          button.append(main, meta, chevron);
+
+          const details = document.createElement("div");
+          details.className = "event-details";
+          details.hidden = !isOpen;
+          event.detailLines.forEach((line) => appendText(details, "event-detail-line", line));
+          if (!event.detailLines.length && event.details) {
+            event.details.split("\n").filter(Boolean).forEach((line) => {
+              appendText(details, "event-detail-line", line);
+            });
+          }
+          if (hasDetails) {
+            button.addEventListener("click", () => {
+              const opening = !openEventDetails.has(key);
+              if (opening) {
+                openEventDetails.add(key);
+              } else {
+                openEventDetails.delete(key);
+              }
+              item.classList.toggle("open", opening);
+              details.hidden = !opening;
+              button.setAttribute("aria-expanded", opening ? "true" : "false");
+            });
+          }
+          content.append(button, details);
+          item.append(icon, time, content);
+          section.append(item);
+        });
+        container.append(section);
+      });
     };
     const seenNotifications = new Set();
     let notificationHistoryLoaded = false;
@@ -376,7 +631,9 @@
     const refreshSidecarTable = async () => {
       const res = await fetch("/sidecars");
       const data = await res.json();
-      window.gosyncMediaTable?.setItems(data.items || []);
+      const items = data.items || [];
+      window.gosyncMediaTable?.setItems(items);
+      renderFormatCounts(items);
     };
     let currentStatus = "idle";
     async function refresh() {
@@ -384,15 +641,16 @@
       const data = await res.json();
       currentStatus = data.status || "idle";
       document.getElementById("overall").textContent = `${data.overall_percent}%`;
-      document.getElementById("downloaded-count").textContent = `${data.completed_ids} / ${data.total_ids}`;
+      document.getElementById("downloaded-count").textContent = `${data.completed_ids} / ${data.total_ids} files`;
       document.getElementById("batches").textContent = `${data.completed_batches} / ${data.total_batches}`;
+      setWidth("media-progress-fill", data.overall_percent);
       const isRunning = data.status === "running";
       document.getElementById("stop-button").disabled = !isRunning || data.stop_requested;
       document.getElementById("start-button").disabled = isRunning;
-      document.getElementById("activity-message").textContent = data.state_label || "Ready";
-      document.getElementById("activity-detail").textContent =
-        data.message || "Waiting for a download job.";
+      const activityLabel = data.state_label || "Ready";
+      document.getElementById("activity-message").textContent = activityLabel;
       const isDownloading = data.current_download_bytes > 0 || data.current_download_started_at > 0;
+      document.getElementById("media-progress-fill").classList.toggle("downloading", isDownloading);
       const downloadIndicator = document.getElementById("download-indicator");
       downloadIndicator.classList.toggle("active", isDownloading);
       downloadIndicator.setAttribute("aria-label", isDownloading ? "Download in progress" : "Download idle");
@@ -408,11 +666,7 @@
           : formatBytes(data.current_download_bytes)
         : "0 B";
       document.getElementById("download-meta").textContent = isDownloading ? "Downloading" : "Idle";
-      const events = document.getElementById("events");
-      events.textContent = data.events.length
-        ? data.events.map((event) => event.replace(/\\n/g, "\n")).join("\n")
-        : "Ready";
-      events.scrollTop = events.scrollHeight;
+      renderEvents(data.events || []);
       const notifications = data.notifications || [];
       if (!notificationHistoryLoaded) {
         if (sessionStorage.getItem("gosync-job-started") === "true") {
@@ -429,6 +683,37 @@
       }
       await refreshSidecarTable();
     }
+    const submitJobForm = async (event, pendingLabel) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const startButton = document.getElementById("start-button");
+      const stopButton = document.getElementById("stop-button");
+      startButton.disabled = true;
+      stopButton.disabled = true;
+      document.getElementById("activity-message").textContent = pendingLabel;
+      try {
+        const body = form.id === "start-form" && window.gosyncMediaTable?.startFormData
+          ? window.gosyncMediaTable.startFormData(form)
+          : new FormData(form);
+        await fetch(form.action, {
+          method: form.method || "post",
+          body,
+          headers: {
+            "X-Requested-With": "fetch",
+          },
+        });
+      } catch (error) {
+        document.getElementById("activity-message").textContent = "Connection error";
+      } finally {
+        await refresh();
+      }
+    };
+    document.getElementById("start-form")?.addEventListener("submit", (event) => {
+      submitJobForm(event, "Starting");
+    });
+    document.getElementById("stop-form")?.addEventListener("submit", (event) => {
+      submitJobForm(event, "Stopping");
+    });
     async function scheduleRefresh() {
       await refresh();
       const delay = currentStatus === "running" ? 1500 : 5000;

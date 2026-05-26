@@ -52,6 +52,39 @@ def build_run_summary(
     return "\n".join(lines)
 
 
+def build_run_summary_event(
+    state: dict[str, Any],
+    manifest: MediaManifest,
+    status: str,
+    cache_sync_changes: list[dict[str, str]],
+    report_path: Path | str | None = None,
+) -> tuple[str, str]:
+    records = media_records(state)
+    downloaded_count = sum(
+        1 for record in records if record.get("download_status") == STATUS_DOWNLOADED
+    )
+    failed_count = sum(
+        1 for record in records if record.get("download_status") == STATUS_FAILED
+    )
+    pending_count = len(records) - downloaded_count - failed_count
+    sidecars_created_count = sum(
+        1 for record in records if record.get("sidecar_status") == "complete"
+    )
+
+    title = f"Run {status}"
+    details = [
+        f"{downloaded_count} of {len(records)} media files downloaded",
+        f"{pending_count} pending",
+        f"{failed_count} failed",
+        f"{sidecars_created_count} sidecars created",
+        f"{len(manifest.duplicates)} duplicates skipped",
+        f"{len(cache_sync_changes)} resume sync changes",
+    ]
+    if report_path:
+        details.append(f"Report: {report_path}")
+    return title, "\n".join(details)
+
+
 def write_run_report(
     data_dir: Path,
     state: dict[str, Any],

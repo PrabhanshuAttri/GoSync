@@ -3,7 +3,7 @@ from pathlib import Path
 
 from gosync.constants import STATUS_DOWNLOADED, STATUS_FAILED
 from gosync.manifest import DuplicateMediaItem, MediaManifest
-from gosync.report import build_run_summary, write_run_report
+from gosync.report import build_run_summary, build_run_summary_event, write_run_report
 
 
 def report_manifest(items) -> MediaManifest:
@@ -77,6 +77,29 @@ def test_build_run_summary_counts_statuses_and_retries(make_media_item) -> None:
     assert "Report: reports/run.json" in summary
 
 
+def test_build_run_summary_event_is_compact_for_ui(make_media_item) -> None:
+    items = [
+        make_media_item("A", "done.mp4", 10),
+        make_media_item("B", "failed.mp4", 20),
+        make_media_item("C", "pending.jpg", 30),
+    ]
+
+    title, details = build_run_summary_event(
+        report_state(items),
+        report_manifest(items),
+        "stopped",
+        [{"id": "1", "filename": "a.mp4", "status": "found"}],
+        Path("reports/run.json"),
+    )
+
+    assert title == "Run stopped"
+    assert "1 of 3 media files downloaded" in details
+    assert "1 pending" in details
+    assert "1 failed" in details
+    assert "1 sidecars created" in details
+    assert "Report: reports/run.json" in details
+
+
 def test_write_run_report_serializes_detailed_buckets(
     tmp_path: Path,
     make_media_item,
@@ -108,4 +131,3 @@ def test_write_run_report_serializes_detailed_buckets(
     assert payload["downloaded"] == [{"id": "A", "filename": "done.mp4"}]
     assert payload["failed"] == [{"id": "B", "filename": "failed.mp4"}]
     assert payload["pending"] == [{"id": "C", "filename": "pending.jpg"}]
-

@@ -1,3 +1,4 @@
+import inspect
 import json
 import time
 import zipfile
@@ -19,6 +20,7 @@ from gosync.constants import (
     STATUS_DOWNLOADED,
     ZIP_URL_PREFIX,
 )
+from gosync.events import ProgressEventThrottle, log_event
 from gosync.manifest import MediaItem
 from gosync.paths import media_download_path, safe_child_path
 from gosync.progress import ProgressState
@@ -73,6 +75,38 @@ def format_media_for_log(item: MediaItem) -> str:
     return f"{item.filename} ({item.media_id}, {format_size_mib(item.file_size)})"
 
 
+def media_event_payload(item: MediaItem) -> dict[str, object]:
+    return {
+        "file_name": item.filename,
+        "file_id": item.media_id,
+        "file_size_bytes": item.file_size,
+        "file_size_human": format_size_mib(item.file_size),
+    }
+
+
+def emit_progress_event(
+    progress: ProgressState | None,
+    event: str,
+    message: str,
+    *,
+    level: str = "INFO",
+    phase: str = "download",
+    job_id: str | None = None,
+    **fields: object,
+) -> None:
+    if progress:
+        progress.emit_event(
+            event,
+            message,
+            level=level,
+            phase=phase,
+            job_id_guard=job_id,
+            **fields,
+        )
+    else:
+        log_event(event, message, level=level, phase=phase, run_id=job_id, **fields)
+
+
 class DownloadCancelled(Exception):
     pass
 
@@ -109,17 +143,25 @@ def resolve_har_file(data_dir: Path, har_file: str | None) -> Path:
     )
 
 
-def extract_browser_headers(har_path: Path) -> dict[str, str]:
+def extract_browser_headers(
+    har_path: Path,
+    progress: ProgressState | None = None,
+    job_id: str | None = None,
+) -> dict[str, str]:
     headers = dict(DEFAULT_HEADERS)
 
     try:
         with har_path.open("r", encoding="utf-8", errors="ignore") as file:
             har = json.load(file)
     except json.JSONDecodeError:
-        print(
-            "Warning: could not parse HAR as JSON. "
-            "Continuing with default headers only.",
-            flush=True,
+        emit_progress_event(
+            progress,
+            "error.validation",
+            "Could not parse HAR as JSON. Continuing with default headers only.",
+            level="WARNING",
+            phase="auth",
+            job_id=job_id,
+            har_file=har_path.name,
         )
         return headers
 
@@ -135,10 +177,15 @@ def extract_browser_headers(har_path: Path) -> dict[str, str]:
                 break
 
     if not best_match:
-        print(
-            "Warning: no GoPro browser request headers found in the HAR. "
-            "Continuing with default headers only.",
-            flush=True,
+        emit_progress_event(
+            progress,
+            "error.auth",
+            "No GoPro browser request headers found in the HAR.",
+            level="WARNING",
+            phase="auth",
+            job_id=job_id,
+            har_file=har_path.name,
+            user_action="Export a fresh HAR while logged in if downloads fail.",
         )
         return headers
 
@@ -159,15 +206,26 @@ def extract_browser_headers(har_path: Path) -> dict[str, str]:
 
     copied_sensitive = sorted({"authorization", "cookie"}.intersection(copied_headers))
     if copied_sensitive:
-        print(
-            f"Reusing browser session header(s): {', '.join(copied_sensitive)}",
-            flush=True,
+        auth_mode = "+".join(copied_sensitive)
+        emit_progress_event(
+            progress,
+            "auth.session.reused",
+            "Browser session reused",
+            phase="auth",
+            job_id=job_id,
+            auth_mode=auth_mode,
+            header_names=copied_sensitive,
         )
     else:
-        print(
-            "Warning: HAR did not include Cookie or Authorization headers. "
-            "If downloads return 403, export a fresh HAR while logged in.",
-            flush=True,
+        emit_progress_event(
+            progress,
+            "error.auth",
+            "HAR did not include Cookie or Authorization headers.",
+            level="WARNING",
+            phase="auth",
+            job_id=job_id,
+            har_file=har_path.name,
+            user_action="Export a fresh HAR while logged in if downloads return 403.",
         )
 
     return headers
@@ -306,9 +364,14 @@ def download_batch(
     headers: dict[str, str],
     progress: ProgressState | None = None,
     job_id: str | None = None,
+    batch_items: list[MediaItem] | None = None,
+    batch_index: int | None = None,
+    batch_total: int | None = None,
 ) -> None:
     batch_str = ",".join(batch)
     url = f"{ZIP_URL_PREFIX}?ids={batch_str}"
+    current_file = batch_items[0] if batch_items and len(batch_items) == 1 else None
+    throttle = ProgressEventThrottle()
 
     try:
         with session.get(
@@ -329,6 +392,16 @@ def download_batch(
                     current_download_started_at=download_started_at,
                     current_download_speed_bps=0,
                     current_download_elapsed_seconds=0,
+                )
+            if current_file:
+                emit_progress_event(
+                    progress,
+                    "download.file.started",
+                    f"Downloading {current_file.filename}",
+                    job_id=job_id,
+                    batch_index=batch_index,
+                    batch_total=batch_total,
+                    **media_event_payload(current_file),
                 )
 
             with temp_zip.open("wb") as file, tqdm(
@@ -353,11 +426,68 @@ def download_batch(
                             if current_bytes is None:
                                 continue
                             elapsed = max(time.monotonic() - download_started_at, 0.001)
+                            speed = current_bytes / elapsed
                             progress.update(
                                 job_id_guard=job_id,
                                 current_download_elapsed_seconds=elapsed,
-                                current_download_speed_bps=current_bytes / elapsed,
+                                current_download_speed_bps=speed,
                             )
+                            if current_file and throttle.should_emit(
+                                current_bytes,
+                                total_size,
+                            ):
+                                progress_percent = (
+                                    round((current_bytes / total_size) * 100, 2)
+                                    if total_size
+                                    else 0
+                                )
+                                progress_message = (
+                                    f"Batch {batch_index}/{batch_total} downloading: "
+                                    f"{progress_percent}% at {format_size_mib(speed)}/s"
+                                )
+                                emit_progress_event(
+                                    progress,
+                                    "download.file.progress",
+                                    progress_message,
+                                    job_id=job_id,
+                                    batch_index=batch_index,
+                                    batch_total=batch_total,
+                                    downloaded_bytes=current_bytes,
+                                    total_bytes=total_size,
+                                    progress_percent=progress_percent,
+                                    speed_bytes_per_sec=round(speed, 2),
+                                    eta_seconds=round(
+                                        max(total_size - current_bytes, 0) / speed
+                                    )
+                                    if speed and total_size
+                                    else None,
+                                    **media_event_payload(current_file),
+                                )
+                                throttle.mark_emitted(current_bytes, total_size)
+            if current_file:
+                final_speed = total_size / max(
+                    time.monotonic() - download_started_at,
+                    0.001,
+                )
+                final_percent = 100 if total_size else 0
+                progress_message = (
+                    f"Batch {batch_index}/{batch_total} downloading: "
+                    f"{final_percent}% at {format_size_mib(final_speed)}/s"
+                )
+                emit_progress_event(
+                    progress,
+                    "download.file.progress",
+                    progress_message,
+                    job_id=job_id,
+                    batch_index=batch_index,
+                    batch_total=batch_total,
+                    downloaded_bytes=total_size,
+                    total_bytes=total_size,
+                    progress_percent=final_percent,
+                    speed_bytes_per_sec=round(final_speed, 2),
+                    eta_seconds=0,
+                    **media_event_payload(current_file),
+                )
     except RETRYABLE_DOWNLOAD_ERRORS as exc:
         raise RuntimeError(f"Retryable download error: {exc}") from exc
 
@@ -405,14 +535,14 @@ def process_pipeline(
         )
 
     if not pending_items:
-        message = (
-            f"All {len(filtered_media_items)} media files have already "
-            "been downloaded."
+        emit_progress_event(
+            progress,
+            "download.file.skipped",
+            "All media files have already been downloaded.",
+            level="WARNING",
+            job_id=job_id,
+            skipped_count=len(filtered_media_items),
         )
-        if progress:
-            progress.log(message, job_id_guard=job_id)
-        else:
-            print(f"\n{message}", flush=True)
         return
 
     batch_cap_items = batch_cap_media_items or filtered_media_items
@@ -435,27 +565,22 @@ def process_pipeline(
             failed_batches=0,
         )
 
-    print(
-        f"\n--- STEP 2: Processing {len(pending_items)} remaining files ---",
-        flush=True,
+    emit_progress_event(
+        progress,
+        "download.phase.started",
+        "Download phase started",
+        job_id=job_id,
+        remaining_count=len(pending_items),
     )
-    if progress:
-        progress.log(
-            f"Using download batch size cap: {batch_cap or 'unknown'} bytes",
-            job_id_guard=job_id,
-        )
-        if file_limit:
-            progress.log(
-                f"Using download files per batch cap: {file_limit}",
-                job_id_guard=job_id,
-            )
-    else:
-        print(
-            f"Using download batch size cap: {batch_cap or 'unknown'} bytes",
-            flush=True,
-        )
-        if file_limit:
-            print(f"Using download files per batch cap: {file_limit}", flush=True)
+    emit_progress_event(
+        progress,
+        "download.batch.configured",
+        "Download batch limits configured",
+        job_id=job_id,
+        batch_size_cap_bytes=batch_cap,
+        batch_size_cap_human=format_size_mib(batch_cap),
+        files_per_batch_cap=file_limit,
+    )
 
     batch_index = 0
     while pending_batches:
@@ -466,20 +591,11 @@ def process_pipeline(
         batch_index += 1
         batch_ids = [item.media_id for item in batch]
         batch_keys = [item.key for item in batch]
-        batch_file_list = "\n".join(
-            f"  - {format_media_for_log(item)}" for item in batch
-        )
-        batch_summary = (
-            f"Processing batch {batch_index} of {total_batches}: {len(batch)} "
-            f"{pluralize(len(batch), 'file')}."
-        )
-        detailed_batch_message = (
-            f"{batch_summary}\nFiles in batch:\n{batch_file_list}"
-        )
+        batch_files = [media_event_payload(item) for item in batch]
         if progress:
             progress.update(
                 job_id_guard=job_id,
-                state_label="Processing",
+                state_label="Downloading",
                 current_batch=batch_index,
                 current_batch_size=len(batch),
                 current_batch_keys=batch_keys,
@@ -489,13 +605,45 @@ def process_pipeline(
                 current_download_speed_bps=0,
                 current_download_elapsed_seconds=0,
             )
-            progress.log(batch_summary, job_id_guard=job_id)
-            progress.log_background(detailed_batch_message, job_id_guard=job_id)
-        else:
-            print(f"\n{detailed_batch_message}", flush=True)
+        emit_progress_event(
+            progress,
+            "download.batch.started",
+            "Batch started",
+            job_id=job_id,
+            batch_index=batch_index,
+            batch_total=total_batches,
+            files_in_batch=len(batch),
+            files=batch_files,
+        )
 
         try:
-            download_batch(session, batch_ids, temp_zip, headers, progress, job_id)
+            supports_download_context = (
+                "batch_items" in inspect.signature(download_batch).parameters
+            )
+            if len(batch) == 1 and not supports_download_context:
+                emit_progress_event(
+                    progress,
+                    "download.file.started",
+                    f"Downloading {batch[0].filename}",
+                    job_id=job_id,
+                    batch_index=batch_index,
+                    batch_total=total_batches,
+                    **media_event_payload(batch[0]),
+                )
+            if supports_download_context:
+                download_batch(
+                    session,
+                    batch_ids,
+                    temp_zip,
+                    headers,
+                    progress,
+                    job_id,
+                    batch_items=batch,
+                    batch_index=batch_index,
+                    batch_total=total_batches,
+                )
+            else:
+                download_batch(session, batch_ids, temp_zip, headers, progress, job_id)
 
             try:
                 with zipfile.ZipFile(temp_zip) as zip_ref:
@@ -514,7 +662,32 @@ def process_pipeline(
                             current_download_speed_bps=0,
                             current_download_elapsed_seconds=0,
                         )
-                    print(f"Extracting to {output_dir}...", flush=True)
+                        progress.emit_event(
+                            "run.cleanup.started",
+                            (
+                                f"{len(batch)} {pluralize(len(batch), 'file')} "
+                                "ready to unpack."
+                            ),
+                            level="active",
+                            phase="cleanup",
+                            title=f"Extracting batch {batch_index} of {total_batches}",
+                            details=f"Destination: {output_dir}",
+                            job_id_guard=job_id,
+                            batch_index=batch_index,
+                            batch_total=total_batches,
+                            destination=str(output_dir),
+                        )
+                    else:
+                        log_event(
+                            "run.cleanup.started",
+                            "Extracting downloaded batch",
+                            level="INFO",
+                            phase="cleanup",
+                            run_id=job_id,
+                            batch_index=batch_index,
+                            batch_total=total_batches,
+                            destination=str(output_dir),
+                        )
                     safe_extract(zip_ref, output_dir)
                     organize_extracted_media(output_dir, batch)
             except zipfile.BadZipFile as exc:
@@ -534,6 +707,11 @@ def process_pipeline(
             if progress:
                 progress.update(
                     job_id_guard=job_id,
+                    state_label="Completed",
+                    message=(
+                        f"Batch {batch_index} of {total_batches} complete: "
+                        f"{len(batch)} {pluralize(len(batch), 'file')} downloaded."
+                    ),
                     completed_ids=completed_count,
                     pending_ids=max(len(filtered_progress_items) - completed_count, 0),
                     current_download_bytes=0,
@@ -545,9 +723,20 @@ def process_pipeline(
                     failed_batches=0,
                 )
                 progress.increment("completed_batches", 1, job_id_guard=job_id)
-                progress.log_background(
-                    f"Batch downloaded:\n{downloaded_list}",
+                progress.emit_event(
+                    "download.batch.completed",
+                    "Batch completed",
+                    level="SUCCESS",
+                    phase="download",
                     job_id_guard=job_id,
+                    set_message=False,
+                    title="Batch completed",
+                    details=downloaded_list,
+                    batch_index=batch_index,
+                    batch_total=total_batches,
+                    files_in_batch=len(batch),
+                    files=batch_files,
+                    completed_count=completed_count,
                 )
                 progress.notify(
                     "success",
@@ -555,8 +744,30 @@ def process_pipeline(
                     f"{len(batch)} {pluralize(len(batch), 'file')} downloaded.",
                     job_id_guard=job_id,
                 )
+                if len(batch) == 1:
+                    progress.emit_event(
+                        "download.file.completed",
+                        f"Downloaded {batch[0].filename}",
+                        phase="download",
+                        job_id_guard=job_id,
+                        set_message=False,
+                        batch_index=batch_index,
+                        batch_total=total_batches,
+                        **media_event_payload(batch[0]),
+                    )
             else:
-                print(f"Batch downloaded:\n{downloaded_list}", flush=True)
+                log_event(
+                    "download.batch.completed",
+                    "Batch completed",
+                    level="SUCCESS",
+                    phase="download",
+                    run_id=job_id,
+                    batch_index=batch_index,
+                    batch_total=total_batches,
+                    files_in_batch=len(batch),
+                    files=batch_files,
+                    completed_count=completed_count,
+                )
 
         except Exception as exc:
             if isinstance(exc, DownloadCancelled):
@@ -591,10 +802,21 @@ def process_pipeline(
             if progress:
                 progress.update(job_id_guard=job_id, failed_batches=1)
                 progress.update(job_id_guard=job_id, current_batch_keys=[])
-                progress.log(
-                    f"Batch failed: {exc}\nFiles in failed batch:\n"
-                    f"{batch_file_list}\n{retry_message}",
+                progress.emit_event(
+                    "download.file.failed",
+                    "Download failed",
+                    level="ERROR",
+                    phase="download",
                     job_id_guard=job_id,
+                    title=f"Batch {batch_index}/{total_batches} failed",
+                    details=retry_message,
+                    batch_index=batch_index,
+                    batch_total=total_batches,
+                    files_in_batch=len(batch),
+                    files=batch_files,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    retry_message=retry_message,
                 )
                 progress.notify(
                     "error",
@@ -604,11 +826,27 @@ def process_pipeline(
                     job_id_guard=job_id,
                 )
             else:
-                print(
-                    f"Batch failed: {exc}\nFiles in failed batch:\n"
-                    f"{batch_file_list}\n{retry_message}",
-                    flush=True,
+                log_event(
+                    "download.file.failed",
+                    "Download failed",
+                    level="ERROR",
+                    phase="download",
+                    run_id=job_id,
+                    batch_index=batch_index,
+                    batch_total=total_batches,
+                    files_in_batch=len(batch),
+                    files=batch_files,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    retry_message=retry_message,
                 )
             time.sleep(2)
 
-    print(f"\nDone. Downloaded media is in {output_dir}.", flush=True)
+    log_event(
+        "run.cleanup.completed",
+        "Download output is ready",
+        phase="cleanup",
+        run_id=job_id,
+        destination=str(output_dir),
+        cli_message=f"Downloaded media is in {output_dir}.",
+    )
