@@ -1,11 +1,14 @@
 DEFAULT_DATA_DIR = "/data"
 DEFAULT_DOWNLOAD_FOLDER = "downloads"
+ORIGINAL_UNMERGED_FOLDER_PREFIX = "original_unmerged"
 DEFAULT_HAR_FILE = "gopro.com.har"
 DEFAULT_STATE_FILE = "gosync_state.json"
 DEFAULT_MANIFEST_FILE = "manifest.json"
 DEFAULT_MEDIA_RESPONSES_FILE = "media_search.json"
 DEFAULT_TEMP_ZIP = "gopro_temp_batch.zip"
 REPORTS_FOLDER = "reports"
+DEFAULT_FFMPEG_BINARY = "ffmpeg"
+DEFAULT_FFMPEG_TIMEOUT_SECONDS = 900
 
 MEDIA_SEARCH_URL = "https://api.gopro.com/media/search"
 ZIP_URL_PREFIX = "https://api.gopro.com/media/x/zip/source"
