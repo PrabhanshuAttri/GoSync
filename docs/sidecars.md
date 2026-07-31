@@ -40,8 +40,8 @@ Sidecars are written next to their media files in lowercase extension folders
 inside the configured download folder:
 
 ```text
-data/downloads/mp4/GX010001.MP4
-data/downloads/mp4/GX010001.MP4.xmp
+data/downloads/mp4/example-video.MP4
+data/downloads/mp4/example-video.MP4.xmp
 ```
 
 The default name format is:

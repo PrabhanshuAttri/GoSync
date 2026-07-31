@@ -1,16 +1,21 @@
+import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from gosync.constants import DEFAULT_TEMP_ZIP
+from gosync.constants import DEFAULT_TEMP_ZIP, STATUS_DOWNLOADED, STATUS_FAILED
 from gosync.downloader import (
     build_size_batches,
+    find_chapter_source_files,
     format_media_for_log,
     format_size_mib,
+    merge_chapter_files,
     organize_extracted_media,
     parse_batch_file_limit,
     parse_batch_max_bytes,
+    parse_chapter_filename,
     process_pipeline,
     resolve_har_file,
     safe_extract,
@@ -18,7 +23,7 @@ from gosync.downloader import (
 from gosync.manifest import MediaManifest
 from gosync.paths import media_download_path
 from gosync.progress import ProgressState
-from gosync.state import create_or_update_state, mark_downloaded
+from gosync.state import create_or_update_state, load_state, mark_downloaded
 
 
 def test_size_batches_use_largest_file_as_auto_cap(make_media_item) -> None:
@@ -78,6 +83,370 @@ def test_size_batches_respect_files_per_batch_limit(make_media_item) -> None:
         ["one.mp4", "two.mp4"],
         ["three.jpg", "four.jpg"],
     ]
+
+
+def test_size_batches_keep_chaptered_items_single(make_media_item) -> None:
+    items = [
+        make_media_item("A", "chaptered.mp4", 70, item_count=2),
+        make_media_item("B", "small.mp4", 20),
+        make_media_item("C", "tiny.jpg", 10),
+    ]
+
+    batches = build_size_batches(items, 100)
+
+    assert [[item.filename for item in batch] for batch in batches] == [
+        ["chaptered.mp4"],
+        ["small.mp4", "tiny.jpg"],
+    ]
+
+
+def test_parse_chapter_filename_orders_modern_chapter_names() -> None:
+    assert parse_chapter_filename("GX010320.MP4") == ("0320", 1)
+    assert parse_chapter_filename("gx020320.mp4") == ("0320", 2)
+    assert parse_chapter_filename("vacation.mp4") is None
+
+
+def test_parse_chapter_filename_supports_gopr_legacy_first_chapter() -> None:
+    assert parse_chapter_filename("GOPR0320.MP4") == ("0320", 0)
+    assert parse_chapter_filename("GP020320.MP4") == ("0320", 2)
+
+
+def test_find_chapter_source_files_orders_by_chapter_number(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for name in ("GX030320.MP4", "GX010320.MP4", "GX020320.MP4"):
+        (output_dir / name).write_text(name, encoding="utf-8")
+
+    result = find_chapter_source_files(output_dir, item)
+
+    assert result == [
+        output_dir / "GX010320.MP4",
+        output_dir / "GX020320.MP4",
+        output_dir / "GX030320.MP4",
+    ]
+
+
+def test_find_chapter_source_files_excludes_other_extensions_and_groups(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    (output_dir / "GX010320.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020320.MP4").write_text("chapter-2", encoding="utf-8")
+    (output_dir / "GL010320.LRV").write_text("proxy", encoding="utf-8")
+    (output_dir / "GX010500.MP4").write_text("other recording", encoding="utf-8")
+
+    result = find_chapter_source_files(output_dir, item)
+
+    assert result == [output_dir / "GX010320.MP4", output_dir / "GX020320.MP4"]
+
+
+def test_find_chapter_source_files_returns_none_when_fewer_than_two_present(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    (output_dir / "GX010320.MP4").write_text("chapter-1", encoding="utf-8")
+
+    assert find_chapter_source_files(output_dir, item) is None
+
+
+def test_merge_chapter_files_success_orders_chapters_in_concat_list(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for name, content in (
+        ("GX030320.MP4", "chapter-3"),
+        ("GX010320.MP4", "chapter-1"),
+        ("GX020320.MP4", "chapter-2"),
+    ):
+        (output_dir / name).write_text(content, encoding="utf-8")
+    target_path = media_download_path(output_dir, item.filename)
+    captured: dict = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        list_path = Path(cmd[cmd.index("-i") + 1])
+        captured["list_lines"] = [
+            line
+            for line in list_path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        Path(cmd[-1]).write_text("chapter-1chapter-2chapter-3", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda _binary: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    progress = ProgressState(job_id="job-1")
+    assert merge_chapter_files(output_dir, item, target_path, progress, "job-1") is True
+    assert target_path.read_text(encoding="utf-8") == "chapter-1chapter-2chapter-3"
+    assert not (output_dir / "GX010320.MP4").exists()
+    assert not (output_dir / "GX020320.MP4").exists()
+    assert not (output_dir / "GX030320.MP4").exists()
+    originals_dir = output_dir / "original_unmerged_mp4"
+    assert (originals_dir / "GX010320.MP4").read_text(encoding="utf-8") == "chapter-1"
+    assert (originals_dir / "GX020320.MP4").read_text(encoding="utf-8") == "chapter-2"
+    assert (originals_dir / "GX030320.MP4").read_text(encoding="utf-8") == "chapter-3"
+    events = progress.snapshot()["events"]
+    started_events = [
+        event for event in events if event["event"] == "download.chapter.merge_started"
+    ]
+    assert len(started_events) == 1
+    assert progress.snapshot()["state_label"] == "Merging"
+    assert captured["list_lines"] == [
+        f"file '{(output_dir / 'GX010320.MP4').resolve()}'",
+        f"file '{(output_dir / 'GX020320.MP4').resolve()}'",
+        f"file '{(output_dir / 'GX030320.MP4').resolve()}'",
+    ]
+    for flag in ("-map", "-map_metadata", "-movflags", "use_metadata_tags"):
+        assert flag in captured["cmd"]
+
+
+def test_merge_chapter_files_missing_ffmpeg_falls_back(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    (output_dir / "GX010320.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020320.MP4").write_text("chapter-2", encoding="utf-8")
+    target_path = media_download_path(output_dir, item.filename)
+    monkeypatch.setattr(shutil, "which", lambda _binary: None)
+    progress = ProgressState(job_id="job-1")
+
+    result = merge_chapter_files(output_dir, item, target_path, progress, "job-1")
+
+    assert result is False
+    assert not target_path.exists()
+    assert (output_dir / "GX010320.MP4").exists()
+    assert (output_dir / "GX020320.MP4").exists()
+    events = progress.snapshot()["events"]
+    assert any(
+        event["event"] == "download.chapter.merge_skipped"
+        and event["level"] == "warning"
+        for event in events
+    )
+
+
+def test_merge_chapter_files_subprocess_failure_preserves_sources(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    (output_dir / "GX010320.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020320.MP4").write_text("chapter-2", encoding="utf-8")
+    target_path = media_download_path(output_dir, item.filename)
+
+    def fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="boom\nsecond line"
+        )
+
+    monkeypatch.setattr(shutil, "which", lambda _binary: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    progress = ProgressState(job_id="job-1")
+
+    result = merge_chapter_files(output_dir, item, target_path, progress, "job-1")
+
+    assert result is False
+    assert not target_path.exists()
+    assert (output_dir / "GX010320.MP4").read_text(encoding="utf-8") == "chapter-1"
+    assert (output_dir / "GX020320.MP4").read_text(encoding="utf-8") == "chapter-2"
+    events = progress.snapshot()["events"]
+    failed_events = [
+        event for event in events if event["event"] == "download.chapter.merge_failed"
+    ]
+    assert len(failed_events) == 1
+    assert failed_events[0]["level"] == "error"
+    assert "boom" in failed_events[0]["error_details"]
+
+
+def test_merge_chapter_files_returns_false_when_fewer_than_two_siblings_no_event(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    (output_dir / "GX010320.MP4").write_text("chapter-1", encoding="utf-8")
+    target_path = media_download_path(output_dir, item.filename)
+    progress = ProgressState(job_id="job-1")
+
+    result = merge_chapter_files(output_dir, item, target_path, progress, "job-1")
+
+    assert result is False
+    assert progress.snapshot()["events"] == []
+
+
+def test_organize_extracted_media_merges_chapter_files_end_to_end(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for name, content in (
+        ("GX010320.MP4", "chapter-1"),
+        ("GX020320.MP4", "chapter-2"),
+        ("GX030320.MP4", "chapter-3"),
+    ):
+        (output_dir / name).write_text(content, encoding="utf-8")
+
+    def fake_run(cmd, **_kwargs):
+        Path(cmd[-1]).write_text("chapter-1chapter-2chapter-3", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda _binary: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    completed_keys = organize_extracted_media(output_dir, [item])
+
+    assert item.key in completed_keys
+    target_path = media_download_path(output_dir, item.filename)
+    assert target_path.read_text(encoding="utf-8") == "chapter-1chapter-2chapter-3"
+    assert not (output_dir / "GX020320.MP4").exists()
+    assert not (output_dir / "GX030320.MP4").exists()
+
+
+def test_organize_extracted_media_never_calls_merge_for_non_chapter_items(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "clip.mp4", 10)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    (output_dir / "clip.mp4").write_text("media", encoding="utf-8")
+
+    def fail_merge(*_args, **_kwargs):
+        raise AssertionError("merge_chapter_files should not be called")
+
+    monkeypatch.setattr("gosync.downloader.merge_chapter_files", fail_merge)
+
+    completed_keys = organize_extracted_media(output_dir, [item])
+
+    assert item.key in completed_keys
+    assert media_download_path(output_dir, "clip.mp4").read_text(
+        encoding="utf-8"
+    ) == "media"
+
+
+def test_process_pipeline_merges_chapter_batch_and_marks_downloaded(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
+    state_file = tmp_path / "state.json"
+    output_dir = tmp_path / "downloads"
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[item],
+            duplicates=[],
+            matching_entries=1,
+            media_responses=[],
+        ),
+    )
+
+    def fake_download_batch(
+        _session,
+        _batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+        **_kwargs,
+    ):
+        with zipfile.ZipFile(temp_zip, "w") as zip_ref:
+            zip_ref.writestr("GX010320.MP4", "chapter-1")
+            zip_ref.writestr("GX020320.MP4", "chapter-2")
+            zip_ref.writestr("GX030320.MP4", "chapter-3")
+
+    def fake_merge(
+        output_dir_arg, merge_item, target_path, _progress=None, _job_id=None
+    ):
+        chapters = find_chapter_source_files(output_dir_arg, merge_item)
+        merged = "".join(path.read_text(encoding="utf-8") for path in chapters)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(merged, encoding="utf-8")
+        for path in chapters:
+            path.unlink()
+        return True
+
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+    monkeypatch.setattr("gosync.downloader.merge_chapter_files", fake_merge)
+
+    process_pipeline(
+        media_items=[item],
+        data_dir=tmp_path,
+        output_dir=output_dir,
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+    )
+
+    state = load_state(state_file)
+    assert state["media"][item.key]["download_status"] == STATUS_DOWNLOADED
+    merged_path = media_download_path(output_dir, item.filename)
+    assert merged_path.read_text(encoding="utf-8") == "chapter-1chapter-2chapter-3"
+    assert not (output_dir / "GX020320.MP4").exists()
+    assert not (output_dir / "GX030320.MP4").exists()
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_merge_chapter_files_real_ffmpeg_smoke(tmp_path: Path, make_media_item) -> None:
+    """Wiring/CLI-argument smoke test against the real ffmpeg binary.
+
+    Chapter ORDER correctness is proven by the mocked tests above via the
+    generated concat list; real per-chapter durations are order-invariant so
+    proving playback order from real ffmpeg output would need brittle
+    pixel-level probing that isn't worth the maintenance cost here.
+    """
+    item = make_media_item("A", "GX010500.MP4", None, item_count=2)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for name in ("GX010500.MP4", "GX020500.MP4"):
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=0.1",
+                "-pix_fmt",
+                "yuv420p",
+                str(output_dir / name),
+            ],
+            capture_output=True,
+            check=True,
+        )
+    target_path = media_download_path(output_dir, item.filename)
+
+    assert merge_chapter_files(output_dir, item, target_path) is True
+    assert target_path.exists()
+    assert target_path.stat().st_size > 0
 
 
 def test_process_pipeline_uses_full_manifest_for_auto_batch_cap(
@@ -179,6 +548,105 @@ def test_process_pipeline_passes_data_dir_temp_zip_to_download_batch(
     )
 
     assert download_calls == [(fake_session, ["A"], tmp_path / DEFAULT_TEMP_ZIP)]
+
+
+def test_process_pipeline_moves_case_variant_file_and_marks_downloaded(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010002.MP4", 10)
+    state_file = tmp_path / "state.json"
+    output_dir = tmp_path / "downloads"
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[item],
+            duplicates=[],
+            matching_entries=1,
+            media_responses=[],
+        ),
+    )
+
+    def fake_download_batch(
+        _session,
+        _batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+        **_kwargs,
+    ):
+        with zipfile.ZipFile(temp_zip, "w") as zip_ref:
+            zip_ref.writestr("gx010002.mp4", "media")
+            zip_ref.writestr("GX020002.mp4", "chapter")
+
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+
+    process_pipeline(
+        media_items=[item],
+        data_dir=tmp_path,
+        output_dir=output_dir,
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+    )
+
+    state = load_state(state_file)
+    assert state["media"][item.key]["download_status"] == STATUS_DOWNLOADED
+    assert not (output_dir / "gx010002.mp4").exists()
+    assert media_download_path(output_dir, item.filename).read_text(
+        encoding="utf-8"
+    ) == "media"
+    assert media_download_path(output_dir, "GX020002.mp4").read_text(
+        encoding="utf-8"
+    ) == "chapter"
+
+
+def test_process_pipeline_does_not_mark_missing_extracted_file_downloaded(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "missing.mp4", 10)
+    state_file = tmp_path / "state.json"
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[item],
+            duplicates=[],
+            matching_entries=1,
+            media_responses=[],
+        ),
+    )
+
+    def fake_download_batch(
+        _session,
+        _batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+        **_kwargs,
+    ):
+        with zipfile.ZipFile(temp_zip, "w"):
+            pass
+
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+
+    process_pipeline(
+        media_items=[item],
+        data_dir=tmp_path,
+        output_dir=tmp_path / "downloads",
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+    )
+
+    state = load_state(state_file)
+    assert state["media"][item.key]["download_status"] == STATUS_FAILED
 
 
 def test_process_pipeline_counts_progress_against_full_manifest(

@@ -10,6 +10,8 @@ writing downloaded media plus XMP sidecars into a mounted data directory.
 - Parses GoPro `media/search` responses from HAR files into a local manifest.
 - Reuses browser session headers from the HAR export for GoPro API downloads.
 - Downloads pending media in resumable size-based batches.
+- Organizes media into extension folders, merging GoPro chapter files into a
+  single file via ffmpeg.
 - Supports optional files-per-batch limits from the web UI.
 - Tracks durable download state in `gosync_state.json`.
 - Generates XMP sidecar files next to downloaded media.
@@ -46,9 +48,14 @@ writing downloaded media plus XMP sidecars into a mounted data directory.
 4. GoSync extracts browser session headers from the HAR.
 5. Pending media are grouped into batches and downloaded as temporary zip files.
 6. Each zip is validated, extracted, organized by extension, and then marked
-   downloaded in JSON state.
+   downloaded in JSON state. If the zip contains extra GoPro chapter files for a
+   manifest item, they are merged via ffmpeg into the manifest item's single
+   target file (reporting a "Merging" status while ffmpeg runs) and the
+   original chapter files are moved into `downloads/original_unmerged_<ext>/`,
+   falling back to separate files if ffmpeg is unavailable or the merge fails.
 7. XMP sidecars are generated next to media files.
 8. Completion, stop, or failure reports are written under `reports/`.
 
-See [usage.md](usage.md) for the user workflow and [development.md](development.md)
-for local build and test commands.
+See [usage.md](usage.md) for the user workflow, [download-items.md](download-items.md)
+for HAR-derived download records and chapter behavior, and
+[development.md](development.md) for local build and test commands.

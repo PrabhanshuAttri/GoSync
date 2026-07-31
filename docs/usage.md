@@ -65,11 +65,11 @@ data/
 |   `-- gosync-report-20260501-120000.json
 `-- downloads/
     |-- jpg/
-    |   |-- GX010002.JPG
-    |   `-- GX010002.JPG.xmp
+    |   |-- example-photo.JPG
+    |   `-- example-photo.JPG.xmp
     `-- mp4/
-        |-- GX010001.MP4
-        `-- GX010001.MP4.xmp
+        |-- example-video.MP4
+        `-- example-video.MP4.xmp
 ```
 
 Files and folders:
@@ -89,8 +89,10 @@ Files and folders:
 - `gopro_temp_batch.zip`: temporary zip file used during a batch download;
   deleted after extraction or failure.
 
-See [XMP sidecar processing](sidecars.md) for sidecar field selection and
-sensitive field exclusions.
+See [download items](download-items.md) for HAR-derived media records,
+extraction behavior, and sidecar relationships. See [XMP sidecar
+processing](sidecars.md) for sidecar field selection and sensitive field
+exclusions.
 
 ## Environment Configuration
 
@@ -117,5 +119,5 @@ docker run --rm \
   -e DOWNLOAD_FOLDER=media \
   -e BATCH_MAX_BYTES=2147483648 \
   -v "$PWD/data:/data" \
-  ghcr.io/prabhanshuattri/gosync:1.2.0
+  ghcr.io/prabhanshuattri/gosync:1.3.0
 ```

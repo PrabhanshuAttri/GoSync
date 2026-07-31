@@ -59,7 +59,7 @@ Plain Docker also works:
 docker run --rm \
   -p 8080:8080 \
   -v "$PWD/data:/data" \
-  ghcr.io/prabhanshuattri/gosync:1.2.0
+  ghcr.io/prabhanshuattri/gosync:1.3.0
 ```
 
 Then open `http://localhost:8080`.
@@ -87,6 +87,8 @@ make sure the Network export includes request headers such as `Cookie` or
   components, and data flow.
 - [Usage guide](docs/usage.md): web UI workflow, resume behavior, data directory
   layout, and environment configuration.
+- [Download items](docs/download-items.md): HAR-derived media records, download
+  state, extraction, chapter files, and sidecar relationships.
 - [XMP sidecar processing](docs/sidecars.md): sidecar field selection and
   sensitive field exclusions.
 - [Development guide](docs/development.md): local builds, direct Python runs,

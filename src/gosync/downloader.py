@@ -1,5 +1,9 @@
 import inspect
 import json
+import re
+import shutil
+import subprocess
+import tempfile
 import time
 import zipfile
 from collections import deque
@@ -10,12 +14,13 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import ChunkedEncodingError, ConnectionError, ReadTimeout
 from urllib3.util.retry import Retry
 
-from gosync.config import REQUEST_TIMEOUT
+from gosync.config import FFMPEG_BINARY, FFMPEG_TIMEOUT_SECONDS, REQUEST_TIMEOUT
 from gosync.constants import (
     DEFAULT_HAR_FILE,
     DEFAULT_HEADERS,
     DEFAULT_TEMP_ZIP,
     MAX_SINGLE_FILE_RETRIES,
+    ORIGINAL_UNMERGED_FOLDER_PREFIX,
     SKIPPED_HAR_HEADERS,
     STATUS_DOWNLOADED,
     ZIP_URL_PREFIX,
@@ -246,6 +251,37 @@ def parse_batch_max_bytes(value: str | int | None, media_items: list[MediaItem])
     return parsed
 
 
+def has_chapter_files(item: MediaItem) -> bool:
+    try:
+        return int(item.metadata.get("item_count") or 0) > 1
+    except (TypeError, ValueError):
+        return False
+
+
+# GoPro chapter filenames encode play order in the filename itself:
+#   - modern: G[HX]<chapter 2-digit><group 4-digit>.<ext>, e.g. GX010320.MP4
+#     (chapter 01) and GX020320.MP4 (chapter 02) of group 0320.
+#   - legacy: GOPR<group 4-digit>.<ext> is chapter 1, followed by
+#     G[PH]<chapter 2-digit><group 4-digit>.<ext> for later chapters.
+# Embedded container metadata cannot be used for ordering: GoPro stamps every
+# chapter of a recording with identical session-level timestamps/duration.
+CHAPTER_FILENAME_PATTERN = re.compile(
+    r"^(?:GOPR(?P<gopr_group>\d{4})"
+    r"|G[A-Z](?P<chapter_num>\d{2})(?P<chapter_group>\d{4}))"
+    r"\.(?P<extension>[A-Za-z0-9]+)$",
+    re.IGNORECASE,
+)
+
+
+def parse_chapter_filename(filename: str) -> tuple[str, int] | None:
+    match = CHAPTER_FILENAME_PATTERN.match(filename)
+    if not match:
+        return None
+    if match.group("gopr_group"):
+        return match.group("gopr_group"), 0
+    return match.group("chapter_group"), int(match.group("chapter_num"))
+
+
 def build_size_batches(
     media_items: list[MediaItem],
     batch_max_bytes: int,
@@ -267,10 +303,19 @@ def build_size_batches(
 
     batches: list[list[MediaItem]] = []
     batch_sizes: list[int] = []
+    batch_accepts_more_files: list[bool] = []
     for item in known_size:
+        if has_chapter_files(item):
+            batches.append([item])
+            batch_sizes.append(item.file_size or 0)
+            batch_accepts_more_files.append(False)
+            continue
+
         item_size = item.file_size or 0
         placed = False
         for index, batch_size in enumerate(batch_sizes):
+            if not batch_accepts_more_files[index]:
+                continue
             batch_has_room = (
                 batch_file_limit is None or len(batches[index]) < batch_file_limit
             )
@@ -282,6 +327,7 @@ def build_size_batches(
         if not placed:
             batches.append([item])
             batch_sizes.append(item_size)
+            batch_accepts_more_files.append(True)
 
     for item in unknown_size:
         batches.append([item])
@@ -324,7 +370,200 @@ def safe_extract(zip_ref: zipfile.ZipFile, output_dir: Path) -> None:
     zip_ref.extractall(output_root)
 
 
-def organize_extracted_media(output_dir: Path, media_items: list[MediaItem]) -> None:
+def _casefolded_file_in_dir(directory: Path, filename: str) -> Path | None:
+    if not directory.exists():
+        return None
+    folded_name = filename.casefold()
+    return next(
+        (
+            path
+            for path in directory.iterdir()
+            if path.is_file()
+            and path.name.casefold() == folded_name
+            and safe_child_path(directory, path)
+        ),
+        None,
+    )
+
+
+def find_chapter_source_files(output_dir: Path, item: MediaItem) -> list[Path] | None:
+    parsed_item = parse_chapter_filename(item.filename)
+    if parsed_item is None or not output_dir.exists():
+        return None
+    item_group, _ = parsed_item
+    item_extension = Path(item.filename).suffix.casefold()
+
+    candidates: list[tuple[int, Path]] = []
+    for candidate in output_dir.iterdir():
+        if not candidate.is_file() or not safe_child_path(output_dir, candidate):
+            continue
+        if candidate.suffix.casefold() != item_extension:
+            continue
+        parsed_candidate = parse_chapter_filename(candidate.name)
+        if parsed_candidate is None:
+            continue
+        candidate_group, chapter_number = parsed_candidate
+        if candidate_group.casefold() != item_group.casefold():
+            continue
+        candidates.append((chapter_number, candidate))
+
+    if len(candidates) < 2:
+        return None
+    candidates.sort(key=lambda pair: pair[0])
+    return [path for _, path in candidates]
+
+
+def merge_chapter_files(
+    output_dir: Path,
+    item: MediaItem,
+    target_path: Path,
+    progress: ProgressState | None = None,
+    job_id: str | None = None,
+) -> bool:
+    chapter_paths = find_chapter_source_files(output_dir, item)
+    if not chapter_paths:
+        return False
+
+    ffmpeg_binary = shutil.which(FFMPEG_BINARY)
+    if not ffmpeg_binary:
+        emit_progress_event(
+            progress,
+            "download.chapter.merge_skipped",
+            f"ffmpeg not found; keeping {len(chapter_paths)} chapter files "
+            f"separate for {item.filename}",
+            level="WARNING",
+            job_id=job_id,
+            chapter_count=len(chapter_paths),
+            **media_event_payload(item),
+        )
+        return False
+
+    emit_progress_event(
+        progress,
+        "download.chapter.merge_started",
+        f"Merging {len(chapter_paths)} chapter files into {item.filename}",
+        level="ACTIVE",
+        state_label="Merging",
+        job_id=job_id,
+        chapter_count=len(chapter_paths),
+        **media_event_payload(item),
+    )
+
+    with tempfile.TemporaryDirectory(dir=output_dir) as tmp_dir_name:
+        tmp_dir = Path(tmp_dir_name)
+        concat_list_path = tmp_dir / "chapters.txt"
+        concat_list_path.write_text(
+            "".join(
+                "file '"
+                + str(path.resolve()).replace("'", "'\\''")
+                + "'\n"
+                for path in chapter_paths
+            ),
+            encoding="utf-8",
+        )
+        merged_tmp_path = tmp_dir / f"merged{target_path.suffix}"
+
+        try:
+            result = subprocess.run(
+                [
+                    ffmpeg_binary,
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(concat_list_path),
+                    "-map",
+                    "0",
+                    "-ignore_unknown",
+                    "-c",
+                    "copy",
+                    "-map_metadata",
+                    "0",
+                    "-movflags",
+                    "use_metadata_tags",
+                    str(merged_tmp_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=FFMPEG_TIMEOUT_SECONDS,
+            )
+            merge_ok = (
+                result.returncode == 0
+                and merged_tmp_path.exists()
+                and merged_tmp_path.stat().st_size > 0
+            )
+            stderr_text = result.stderr or ""
+        except (OSError, subprocess.SubprocessError) as exc:
+            merge_ok = False
+            stderr_text = str(exc)
+
+        if not merge_ok:
+            stderr_tail = "\n".join(stderr_text.strip().splitlines()[-20:])
+            emit_progress_event(
+                progress,
+                "download.chapter.merge_failed",
+                f"Failed to merge {len(chapter_paths)} chapter files for "
+                f"{item.filename}",
+                level="ERROR",
+                job_id=job_id,
+                chapter_count=len(chapter_paths),
+                error_details=stderr_tail,
+                **media_event_payload(item),
+            )
+            return False
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        merged_tmp_path.replace(target_path)
+
+    extension = target_path.suffix.lstrip(".").lower() or "unknown"
+    originals_dir = output_dir / f"{ORIGINAL_UNMERGED_FOLDER_PREFIX}_{extension}"
+    originals_dir.mkdir(parents=True, exist_ok=True)
+    for chapter_path in chapter_paths:
+        if not chapter_path.exists():
+            continue
+        chapter_path.replace(originals_dir / chapter_path.name)
+
+    emit_progress_event(
+        progress,
+        "download.chapter.merged",
+        f"Merged {len(chapter_paths)} chapter files into {item.filename}",
+        job_id=job_id,
+        chapter_count=len(chapter_paths),
+        **media_event_payload(item),
+    )
+    return True
+
+
+def organize_flat_media_files(output_dir: Path) -> None:
+    if not output_dir.exists():
+        return
+    # GoPro zip downloads can include extra chapter files for one manifest item.
+    for source_path in output_dir.iterdir():
+        if (
+            not source_path.is_file()
+            or not source_path.suffix
+            or source_path.suffix.casefold() == ".xmp"
+            or not safe_child_path(output_dir, source_path)
+        ):
+            continue
+
+        target_path = media_download_path(output_dir, source_path.name)
+        if source_path == target_path or not safe_child_path(output_dir, target_path):
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if not target_path.exists():
+            source_path.replace(target_path)
+
+
+def organize_extracted_media(
+    output_dir: Path,
+    media_items: list[MediaItem],
+    progress: ProgressState | None = None,
+    job_id: str | None = None,
+) -> set[str]:
+    completed_keys: set[str] = set()
     for item in media_items:
         target_path = media_download_path(output_dir, item.filename)
         if not safe_child_path(output_dir, target_path):
@@ -332,6 +571,22 @@ def organize_extracted_media(output_dir: Path, media_items: list[MediaItem]) -> 
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         if target_path.exists():
+            completed_keys.add(item.key)
+            continue
+
+        if has_chapter_files(item) and merge_chapter_files(
+            output_dir, item, target_path, progress, job_id
+        ):
+            completed_keys.add(item.key)
+            continue
+
+        case_variant_target = _casefolded_file_in_dir(
+            target_path.parent,
+            target_path.name,
+        )
+        if case_variant_target:
+            case_variant_target.replace(target_path)
+            completed_keys.add(item.key)
             continue
 
         source_path = output_dir / item.filename
@@ -339,6 +594,16 @@ def organize_extracted_media(output_dir: Path, media_items: list[MediaItem]) -> 
             continue
         if source_path.exists():
             source_path.replace(target_path)
+            completed_keys.add(item.key)
+            continue
+
+        case_variant_source = _casefolded_file_in_dir(output_dir, item.filename)
+        if case_variant_source:
+            case_variant_source.replace(target_path)
+            completed_keys.add(item.key)
+
+    organize_flat_media_files(output_dir)
+    return completed_keys
 
 
 def create_session() -> requests.Session:
@@ -689,7 +954,21 @@ def process_pipeline(
                             destination=str(output_dir),
                         )
                     safe_extract(zip_ref, output_dir)
-                    organize_extracted_media(output_dir, batch)
+                    completed_keys = organize_extracted_media(
+                        output_dir, batch, progress, job_id
+                    )
+                    if completed_keys is not None:
+                        missing_items = [
+                            item for item in batch if item.key not in completed_keys
+                        ]
+                        if missing_items:
+                            missing_names = ", ".join(
+                                item.filename for item in missing_items
+                            )
+                            raise RuntimeError(
+                                "Downloaded archive did not contain completed "
+                                f"media files: {missing_names}"
+                            )
             except zipfile.BadZipFile as exc:
                 raise RuntimeError(
                     "Downloaded file is not a valid zip archive."
