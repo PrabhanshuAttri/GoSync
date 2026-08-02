@@ -58,6 +58,10 @@ def create_or_update_state(
             or item.metadata.get("submitted_at")
             or ""
         )
+        try:
+            item_count = int(item.metadata.get("item_count") or 1)
+        except (TypeError, ValueError):
+            item_count = 1
 
         media_records[item.key] = {
             "key": item.key,
@@ -66,8 +70,10 @@ def create_or_update_state(
             "sidecar_filename": item.sidecar_filename,
             "file_size": item.file_size,
             "captured_at": captured_at,
+            "item_count": item_count,
             "download_status": download_status,
             "sidecar_status": str(previous.get("sidecar_status") or STATUS_PENDING),
+            "telemetry_status": str(previous.get("telemetry_status") or STATUS_PENDING),
             "retry_count": int(previous.get("retry_count") or 0),
             "last_error": str(previous.get("last_error") or ""),
         }
@@ -223,6 +229,14 @@ def pending_keys(state: dict[str, Any]) -> set[str]:
     }
 
 
+def downloaded_keys(state: dict[str, Any]) -> set[str]:
+    return {
+        str(record.get("key"))
+        for record in media_records(state)
+        if record.get("download_status") == STATUS_DOWNLOADED
+    }
+
+
 def mark_sidecars(
     state_file: Path,
     keys: list[str],
@@ -238,6 +252,25 @@ def mark_sidecars(
         if isinstance(record, dict):
             record["sidecar_status"] = status
             record["last_error"] = error
+    save_state(state_file, state)
+
+
+def mark_telemetry(
+    state_file: Path,
+    keys: list[str],
+    status: str,
+    error: str = "",
+) -> None:
+    state = load_state(state_file)
+    media = state.get("media", {})
+    if not isinstance(media, dict):
+        return
+    for key in keys:
+        record = media.get(key)
+        if isinstance(record, dict):
+            record["telemetry_status"] = status
+            if error:
+                record["last_error"] = error
     save_state(state_file, state)
 
 

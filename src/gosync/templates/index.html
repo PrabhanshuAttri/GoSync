@@ -72,34 +72,42 @@
         </div>
         <section class="panel">
           <div class="panel-header">
-            <h2>HAR File</h2>
-            <span class="hint">Session source</span>
+            <h2>Settings</h2>
           </div>
-          <form action="/upload" method="post" enctype="multipart/form-data">
-            <input type="file" name="har_file" accept=".har,application/json" required>
-            <button type="submit">Upload HAR</button>
+          <form id="har-upload-form" action="/upload" method="post" enctype="multipart/form-data">
+            <label class="field-label" for="har-file-input">HAR file</label>
+            <input id="har-file-input" type="file" name="har_file" accept=".har,application/json">
           </form>
-          <span class="current-file">Current: <strong>{{ har_file }}</strong></span>
-        </section>
 
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Download Job</h2>
-            <span class="hint">One active job</span>
-          </div>
-          <form id="start-form" action="/start" method="post">
-            <select name="har_file">
-              {% for file in har_files %}
-              <option value="{{ file }}" {% if file == har_file %}selected{% endif %}>{{ file }}</option>
-              {% endfor %}
-            </select>
+          <form id="start-form" action="/start" method="post" class="settings-form">
+            <label class="field-label" for="auth-token">GoPro API token</label>
+            <input id="auth-token" name="auth_token" type="password" autocomplete="off"
+                   placeholder="{% if auth_token_set %}Saved (blank keeps it){% else %}Optional bearer token{% endif %}">
+            <label class="field-label" for="user-id">User ID</label>
+            <input id="user-id" name="user_id" type="text" autocomplete="off" value="{{ user_id }}" placeholder="Optional">
+            <label class="checkbox-option">
+              <input type="checkbox" name="download_telemetry" {% if download_telemetry %}checked{% endif %}>
+              Also fetch mediainfo + GPX/GPMF
+            </label>
+            <label class="checkbox-option">
+              <input type="checkbox" name="create_xmp_sidecars" {% if create_xmp_sidecars %}checked{% endif %}>
+              Create Immich XMP sidecars
+            </label>
+
+            <input type="hidden" name="har_file" value="{{ har_file if har_files else '' }}">
             <label class="field-label" for="files-per-batch">Files per batch</label>
             <input id="files-per-batch" name="files_per_batch" type="number" min="1" step="1" placeholder="Auto">
             <span class="selection-summary" id="selection-summary">No files selected</span>
-            <button id="start-button" class="secondary" type="submit" {% if not har_files %}disabled{% endif %}>Start Download</button>
+            <button id="start-button" class="secondary" type="submit" {% if not har_files and auth_method != 'api_token' %}disabled{% endif %}>Start Download</button>
           </form>
           <form id="stop-form" action="/stop" method="post" class="stop-form">
             <button id="stop-button" class="danger" type="submit" disabled>Stop Download</button>
+          </form>
+          <form id="update-sidecars-form" action="/update-sidecars" method="post" class="stop-form">
+            <button id="update-sidecars-button" class="secondary" type="submit"
+                    {% if not har_files and auth_method != 'api_token' %}disabled{% endif %}>
+              Update All Sidecars
+            </button>
           </form>
         </section>
       </aside>
@@ -221,7 +229,6 @@
                     <input id="select-visible" type="checkbox" aria-label="Select visible pending files">
                   </th>
                   <th>Filename</th>
-                  <th>Sidecar Filename</th>
                   <th>
                     <button class="sort-button" type="button" data-sort-key="size" aria-label="Sort by size">
                       <span>Size</span>
@@ -232,6 +239,12 @@
                     <button class="sort-button" type="button" data-sort-key="captured_at" aria-label="Sort by date captured">
                       <span>Captured</span>
                       <span class="sort-indicator" id="captured-at-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="sort-button" type="button" data-sort-key="item_count" aria-label="Sort by item count">
+                      <span>Item Count</span>
+                      <span class="sort-indicator" id="item-count-sort-indicator" aria-hidden="true"></span>
                     </button>
                   </th>
                   <th>
@@ -658,6 +671,7 @@
       const isRunning = data.status === "running";
       document.getElementById("stop-button").disabled = !isRunning || data.stop_requested;
       document.getElementById("start-button").disabled = isRunning;
+      document.getElementById("update-sidecars-button").disabled = isRunning;
       const activityLabel = data.state_label || "Ready";
       document.getElementById("activity-message").textContent = activityLabel;
       const isDownloading = data.current_download_bytes > 0 || data.current_download_started_at > 0;
@@ -724,6 +738,30 @@
     });
     document.getElementById("stop-form")?.addEventListener("submit", (event) => {
       submitJobForm(event, "Stopping");
+    });
+    document.getElementById("update-sidecars-form")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const button = document.getElementById("update-sidecars-button");
+      button.disabled = true;
+      document.getElementById("activity-message").textContent = "Updating sidecars";
+      try {
+        await fetch(form.action, {
+          method: form.method || "post",
+          body: new FormData(form),
+          headers: { "X-Requested-With": "fetch" },
+        });
+      } catch (error) {
+        document.getElementById("activity-message").textContent = "Connection error";
+      } finally {
+        button.disabled = false;
+        await refresh();
+      }
+    });
+    document.getElementById("har-file-input")?.addEventListener("change", (event) => {
+      if (event.currentTarget.files.length > 0) {
+        document.getElementById("har-upload-form").requestSubmit();
+      }
     });
     async function scheduleRefresh() {
       await refresh();

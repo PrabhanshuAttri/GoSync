@@ -1,18 +1,14 @@
 import json
 import logging
-import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
 from gosync.constants import (
-    COMMON_SIDECAR_FIELDS,
-    IMAGE_SIDECAR_FIELDS,
     STATUS_COMPLETE,
     STATUS_FAILED,
     STATUS_RUNNING,
-    VIDEO_SIDECAR_FIELDS,
 )
 from gosync.manifest import (
     MediaItem,
@@ -21,6 +17,7 @@ from gosync.manifest import (
 from gosync.paths import sidecar_output_path
 from gosync.progress import ProgressState
 from gosync.state import mark_sidecars
+from gosync.telemetry import media_stem
 
 LOGGER = logging.getLogger("gosync.sidecar")
 
@@ -39,32 +36,6 @@ def xml_escape(value: Any) -> str:
     return escape(xml_value(value), {'"': "&quot;"})
 
 
-def normalize_datetime(value: Any) -> str:
-    if not value:
-        return ""
-
-    text = str(value)
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
-
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return str(value)
-
-    return parsed.isoformat()
-
-
-def xmp_property_name(key: str) -> str:
-    parts = re.split(r"[^0-9A-Za-z]+", key)
-    name = "".join(part[:1].upper() + part[1:] for part in parts if part)
-    if not name:
-        return "Field"
-    if name[0].isdigit():
-        return f"Field{name}"
-    return name
-
-
 def sidecar_stem(metadata: dict[str, Any]) -> str:
     filename = Path(str(metadata["filename"])).name
     extension = str(metadata.get("file_extension") or Path(filename).suffix).lstrip(".")
@@ -79,87 +50,133 @@ def sidecar_stem(metadata: dict[str, Any]) -> str:
     return f"{filename}.{extension}"
 
 
-def media_kind(metadata: dict[str, Any]) -> str:
-    content_type = str(metadata.get("content_type", "")).lower()
-    item_type = str(metadata.get("type") or metadata.get("play_as") or "").lower()
-    extension = str(
-        metadata.get("file_extension") or Path(str(metadata.get("filename", ""))).suffix
-    ).lower()
+def format_captured_datetime(metadata: dict[str, Any]) -> str:
+    """Immich/EXIF-style local capture timestamp: captured_at (a UTC instant)
+    converted into the camera's local offset from captured_at_timezone, e.g.
+    2026-07-11T13:32:32.000-10:00 -- not just captured_at relabeled."""
+    raw = metadata.get("captured_at") or metadata.get("created_at") or metadata.get(
+        "submitted_at"
+    )
+    if not raw:
+        return ""
 
-    if content_type.startswith("video/") or item_type == "video":
-        return "video"
-    if content_type.startswith("image/") or item_type in {"image", "photo"}:
-        return "image"
-    if extension.lstrip(".") in {"mp4", "mov", "lrv", "360"}:
-        return "video"
-    if extension.lstrip(".") in {"jpg", "jpeg", "png", "gpr", "dng", "heic"}:
-        return "image"
-    return "media"
+    text = str(raw)
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return str(raw)
+
+    tz_offset = str(metadata.get("captured_at_timezone") or "").strip()
+    if tz_offset:
+        try:
+            sign = -1 if tz_offset.startswith("-") else 1
+            hours, minutes = tz_offset.lstrip("+-").split(":")
+            offset = sign * timedelta(hours=int(hours), minutes=int(minutes))
+            parsed = parsed.astimezone(timezone(offset))
+        except (ValueError, AttributeError):
+            pass
+
+    offset = parsed.utcoffset() or timedelta(0)
+    offset_minutes = int(offset.total_seconds() // 60)
+    offset_sign = "+" if offset_minutes >= 0 else "-"
+    offset_minutes = abs(offset_minutes)
+    offset_text = f"{offset_sign}{offset_minutes // 60:02d}:{offset_minutes % 60:02d}"
+    return (
+        f"{parsed.strftime('%Y-%m-%dT%H:%M:%S')}"
+        f".{parsed.microsecond // 1000:03d}{offset_text}"
+    )
 
 
-def sidecar_field_names(metadata: dict[str, Any]) -> set[str]:
-    kind = media_kind(metadata)
-    if kind == "video":
-        return VIDEO_SIDECAR_FIELDS
-    if kind == "image":
-        return IMAGE_SIDECAR_FIELDS
-    return COMMON_SIDECAR_FIELDS
+def gps_dms(value: float, positive: str, negative: str) -> str:
+    """EXIF-style degrees,decimal-minutes-with-hemisphere, e.g. 37,20.250N."""
+    hemisphere = positive if value >= 0 else negative
+    value = abs(value)
+    degrees = int(value)
+    minutes = (value - degrees) * 60
+    return f"{degrees},{minutes:.3f}{hemisphere}"
 
 
-def build_xmp(metadata: dict[str, Any]) -> str:
-    captured_at = normalize_datetime(metadata.get("captured_at"))
-    created_at = normalize_datetime(metadata.get("created_at"))
-    updated_at = normalize_datetime(metadata.get("updated_at"))
-    submitted_at = normalize_datetime(metadata.get("submitted_at"))
-    title = metadata.get("content_title") or metadata.get("filename")
+def gps_altitude(value: float) -> tuple[str, str]:
+    """EXIF GPSAltitude as a rational string plus its GPSAltitudeRef
+    (0 = above sea level, 1 = below)."""
+    ref = "0" if value >= 0 else "1"
+    return f"{round(abs(value) * 1000)}/1000", ref
 
-    standard_attributes: list[tuple[str, Any]] = [
-        ("xmp:CreateDate", captured_at or created_at or submitted_at),
-        ("xmp:ModifyDate", updated_at),
-        ("xmp:MetadataDate", updated_at or created_at or submitted_at),
-        ("dc:format", metadata.get("content_type")),
-        ("tiff:Model", metadata.get("camera_model")),
-        ("exif:PixelXDimension", metadata.get("width")),
-        ("exif:PixelYDimension", metadata.get("height")),
+
+def geo_from_telemetry(output_dir: Path, filename: str) -> dict[str, float] | None:
+    """Reuse GPS coordinates already fetched by the telemetry step (step 6),
+    if a mediainfo.json for this item exists from a previous run."""
+    json_path = output_dir / "json" / f"{media_stem(filename)}_mediainfo.json"
+    if not json_path.exists():
+        return None
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    geo = payload.get("media", {}).get("geoData")
+    if isinstance(geo, dict) and geo.get("latitude") is not None and geo.get(
+        "longitude"
+    ) is not None:
+        return geo
+    return None
+
+
+def build_xmp(metadata: dict[str, Any], geo: dict[str, float] | None = None) -> str:
+    captured = format_captured_datetime(metadata)
+    description = metadata.get("content_description") or metadata.get("content_title")
+    tags = [
+        tag.strip()
+        for tag in str(metadata.get("tags") or "").split(",")
+        if tag.strip()
     ]
-    standard_xml = "\n".join(
-        f'   {name}="{xml_escape(value)}"'
-        for name, value in standard_attributes
-        if value not in (None, "")
-    )
+    camera_model = metadata.get("camera_model")
+    if camera_model:
+        tags.append(f"GoPro {camera_model}")
 
-    allowed_fields = sidecar_field_names(metadata)
-    gopro_fields = {
-        key: metadata[key]
-        for key in sorted(allowed_fields.intersection(metadata.keys()))
-        if metadata[key] not in (None, "")
-    }
-    gopro_xml = "\n".join(
-        f'   gopro:{xmp_property_name(key)}="{xml_escape(value)}"'
-        for key, value in gopro_fields.items()
-    )
-    attribute_xml = "\n".join(part for part in (standard_xml, gopro_xml) if part)
-
-    title_xml = ""
-    if title:
-        title_xml = (
-            "\n   <dc:title>\n"
-            "    <rdf:Alt>\n"
-            f"     <rdf:li xml:lang=\"x-default\">{xml_escape(title)}</rdf:li>\n"
-            "    </rdf:Alt>\n"
-            "   </dc:title>"
+    elements: list[str] = []
+    if description:
+        escaped_description = xml_escape(description)
+        elements.append(f"   <dc:description>{escaped_description}</dc:description>")
+    if tags:
+        tag_items = "\n".join(
+            f"     <rdf:li>{xml_escape(tag)}</rdf:li>" for tag in tags
         )
+        elements.append(
+            "   <digiKam:TagsList>\n    <rdf:Seq>\n"
+            f"{tag_items}\n    </rdf:Seq>\n   </digiKam:TagsList>"
+        )
+    if captured:
+        elements.append(f"   <exif:DateTimeOriginal>{captured}</exif:DateTimeOriginal>")
+        elements.append(f"   <xmp:CreateDate>{captured}</xmp:CreateDate>")
+        elements.append(f"   <photoshop:DateCreated>{captured}</photoshop:DateCreated>")
+    if geo:
+        latitude = gps_dms(geo["latitude"], "N", "S")
+        longitude = gps_dms(geo["longitude"], "E", "W")
+        elements.append(f"   <exif:GPSLatitude>{latitude}</exif:GPSLatitude>")
+        elements.append(f"   <exif:GPSLongitude>{longitude}</exif:GPSLongitude>")
+        if geo.get("altitude") is not None:
+            fraction, ref = gps_altitude(geo["altitude"])
+            elements.append(f"   <exif:GPSAltitude>{fraction}</exif:GPSAltitude>")
+            elements.append(f"   <exif:GPSAltitudeRef>{ref}</exif:GPSAltitudeRef>")
+    if camera_model:
+        elements.append("   <tiff:Make>GoPro</tiff:Make>")
+        elements.append(f"   <tiff:Model>{xml_escape(camera_model)}</tiff:Model>")
 
-    return f"""<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/">
+    body = "\n".join(elements)
+
+    return f"""<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 6.0.0">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""
-   xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-   xmlns:dc="http://purl.org/dc/elements/1.1/"
-   xmlns:tiff="http://ns.adobe.com/tiff/1.0/"
-   xmlns:exif="http://ns.adobe.com/exif/1.0/"
-   xmlns:gopro="https://gopro.com/ns/media/1.0/"
-{attribute_xml}>{title_xml}
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:exif="http://ns.adobe.com/exif/1.0/"
+    xmlns:tiff="http://ns.adobe.com/tiff/1.0/"
+    xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
+    xmlns:digiKam="http://www.digikam.org/ns/1.0/">
+{body}
   </rdf:Description>
  </rdf:RDF>
 </x:xmpmeta>
@@ -186,7 +203,8 @@ def write_sidecars_for_manifest(
             media_item.sidecar_filename,
         )
         sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-        sidecar_path.write_text(build_xmp(media_item.metadata), encoding="utf-8")
+        geo = geo_from_telemetry(output_dir, media_item.filename)
+        sidecar_path.write_text(build_xmp(media_item.metadata, geo), encoding="utf-8")
         written_keys.append(media_item.key)
 
     if state_file:

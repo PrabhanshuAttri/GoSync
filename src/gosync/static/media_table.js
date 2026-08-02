@@ -33,7 +33,7 @@
     ? new Set(restoredSettings.selectedKeys)
     : null;
   let mediaSort = {
-    key: ["size", "status", "captured_at"].includes(restoredSettings.sortKey)
+    key: ["size", "status", "captured_at", "item_count"].includes(restoredSettings.sortKey)
       ? restoredSettings.sortKey
       : "status",
     direction: ["asc", "desc"].includes(restoredSettings.sortDirection)
@@ -65,7 +65,7 @@
     (items || []).map((item) => [
       item.key || "",
       item.filename || "",
-      item.sidecar_filename || "",
+      item.item_count ?? 1,
       item.file_size ?? null,
       item.captured_at || "",
       item.status || "",
@@ -213,6 +213,10 @@
       if (aTime < 0 && bTime >= 0) result = 1;
       else if (aTime >= 0 && bTime < 0) result = -1;
       else result = (aTime - bTime) * (mediaSort.direction === "asc" ? 1 : -1);
+    } else if (mediaSort.key === "item_count") {
+      const aCount = Number(a.item_count ?? 1);
+      const bCount = Number(b.item_count ?? 1);
+      result = (aCount - bCount) * (mediaSort.direction === "asc" ? 1 : -1);
     } else {
       result = (
         statusRank(a.status) - statusRank(b.status)
@@ -293,9 +297,9 @@
       const selectCell = document.createElement("td");
       const checkbox = document.createElement("input");
       const filename = document.createElement("td");
-      const sidecar = document.createElement("td");
       const size = document.createElement("td");
       const capturedAt = document.createElement("td");
+      const itemCount = document.createElement("td");
       const statusCell = document.createElement("td");
       const status = document.createElement("span");
       const downloaded = isDownloaded(item);
@@ -325,18 +329,17 @@
 
       filename.textContent = item.filename;
       filename.title = item.filename;
-      sidecar.textContent = item.sidecar_filename;
-      sidecar.title = item.sidecar_filename;
       size.textContent = formatFileSize(item.file_size);
       size.title = item.file_size ? `${item.file_size} bytes` : "Unknown size";
       capturedAt.textContent = formatCapturedDate(item.captured_at);
       capturedAt.title = formatCapturedDateTime(item.captured_at);
+      itemCount.textContent = String(item.item_count ?? 1);
       status.className = `table-status ${item.status}`;
       status.textContent = item.status;
 
       selectCell.append(checkbox);
       statusCell.append(status);
-      row.append(selectCell, filename, sidecar, size, capturedAt, statusCell);
+      row.append(selectCell, filename, size, capturedAt, itemCount, statusCell);
       tableBody.append(row);
     });
     if (tableWrap) {

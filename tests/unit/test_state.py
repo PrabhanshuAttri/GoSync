@@ -7,6 +7,7 @@ from gosync.state import (
     completed_count,
     create_or_update_state,
     downloaded_extension_counts,
+    downloaded_keys,
     format_downloaded_extension_summary,
     load_state,
     mark_downloaded,
@@ -153,6 +154,7 @@ def test_state_markers_update_counts_and_errors(
     assert state["media"][item.key]["last_error"] == "timeout"
     assert completed_count(state) == 0
     assert pending_keys(state) == {item.key}
+    assert downloaded_keys(state) == set()
 
     state = mark_failed(state_file, [item.key], "gave up", retry=False)
     assert state["media"][item.key]["download_status"] == STATUS_FAILED
@@ -162,6 +164,7 @@ def test_state_markers_update_counts_and_errors(
     assert state["media"][item.key]["last_error"] == ""
     assert completed_count(state) == 1
     assert pending_keys(state) == set()
+    assert downloaded_keys(state) == {item.key}
 
     mark_sidecars(state_file, [item.key], "complete")
     assert load_state(state_file)["media"][item.key]["sidecar_status"] == "complete"

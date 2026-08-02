@@ -5,11 +5,14 @@ from pathlib import Path
 import pytest
 
 from gosync.manifest import (
+    build_manifest_from_pages,
     extract_media_items,
     filename_extension,
     format_extension_summary,
     is_media_file,
+    json_api_headers,
     parse_response_text,
+    read_manifest_from_api,
     read_manifest_from_har,
     sidecar_filename,
 )
@@ -128,3 +131,109 @@ def test_read_manifest_requires_media_search_entries(
 
     with pytest.raises(ValueError, match="No API calls"):
         read_manifest_from_har(har_path)
+
+
+def test_build_manifest_from_pages_dedupes_like_the_har_path() -> None:
+    page = (
+        "https://api.gopro.com/media/search?page=1",
+        [
+            {"id": "A", "filename": "a.mp4", "file_extension": "mp4", "file_size": 1},
+            {"id": "B", "filename": "b.jpg", "file_extension": "jpg", "file_size": 2},
+            {"id": "A", "filename": "a.mp4", "file_extension": "mp4", "file_size": 1},
+        ],
+    )
+
+    manifest = build_manifest_from_pages([page])
+
+    assert [item.key for item in manifest.media] == ["A_a.mp4", "B_b.jpg"]
+    assert len(manifest.duplicates) == 1
+    assert manifest.matching_entries == 1
+
+
+def test_build_manifest_from_pages_rejects_empty_media() -> None:
+    with pytest.raises(ValueError, match="No media file metadata"):
+        build_manifest_from_pages([("https://api.gopro.com/media/search", [])])
+
+
+def test_json_api_headers_overrides_accept_but_keeps_authorization() -> None:
+    headers = json_api_headers(
+        {"Authorization": "Bearer xyz", "Accept": "application/zip"}
+    )
+
+    assert headers["Authorization"] == "Bearer xyz"
+    assert headers["Accept"] == "application/vnd.gopro.jk.media+json; version=2.0.0"
+
+
+def test_read_manifest_from_api_paginates_until_last_page(monkeypatch) -> None:
+    pages = [
+        {
+            "_embedded": {
+                "media": [
+                    {"id": "A", "filename": "a.mp4", "file_extension": "mp4"},
+                ]
+            },
+            "_pages": {"total_pages": 2},
+        },
+        {
+            "_embedded": {
+                "media": [
+                    {"id": "B", "filename": "b.mp4", "file_extension": "mp4"},
+                ]
+            },
+            "_pages": {"total_pages": 2},
+        },
+    ]
+    requested_pages: list[int] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.url = "https://api.gopro.com/media/search?page=1"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return self._payload
+
+    def fake_get(url, headers, params, timeout):
+        requested_pages.append(params["page"])
+        return FakeResponse(pages[params["page"] - 1])
+
+    monkeypatch.setattr("gosync.manifest.requests.get", fake_get)
+
+    manifest = read_manifest_from_api({"Authorization": "Bearer xyz"})
+
+    assert requested_pages == [1, 2]
+    assert [item.key for item in manifest.media] == ["A_a.mp4", "B_b.mp4"]
+    assert manifest.matching_entries == 2
+
+
+def test_read_manifest_from_api_scopes_by_user_id(monkeypatch) -> None:
+    seen_params: list[dict] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "_embedded": {
+                    "media": [
+                        {"id": "A", "filename": "a.mp4", "file_extension": "mp4"},
+                    ]
+                },
+                "_pages": {"total_pages": 1},
+            }
+
+        url = "https://api.gopro.com/media/search?page=1"
+
+    def fake_get(url, headers, params, timeout):
+        seen_params.append(params)
+        return FakeResponse()
+
+    monkeypatch.setattr("gosync.manifest.requests.get", fake_get)
+
+    read_manifest_from_api({"Authorization": "Bearer xyz"}, user_id="user-123")
+
+    assert seen_params[0]["gopro_user_id"] == "user-123"

@@ -350,12 +350,15 @@ form {
   gap: 12px;
 }
 
+#start-form,
 .stop-form {
   margin-top: 12px;
 }
 
 input[type="file"],
 input[type="number"],
+input[type="text"],
+input[type="password"],
 select {
   width: 100%;
   min-height: 42px;
@@ -370,6 +373,19 @@ input[type="checkbox"] {
   width: 18px;
   height: 18px;
   accent-color: var(--brand);
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.checkbox-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.875rem;
 }
 
 .field-label {
