@@ -59,7 +59,7 @@ def test_sync_state_with_downloads_marks_found_and_missing_files(
     tmp_path: Path,
     make_media_item,
 ) -> None:
-    item = make_media_item("A", "GX010002.JPG", 50)
+    item = make_media_item("A", "GX010002.JPG", 4)
     state_file = tmp_path / "state.json"
     downloads = tmp_path / "downloads"
     create_or_update_state(state_file, manifest_for_state([item]))
@@ -82,7 +82,7 @@ def test_sync_state_with_downloads_finds_existing_flat_media_files(
     tmp_path: Path,
     make_media_item,
 ) -> None:
-    item = make_media_item("A", "GX010002.MP4", 50)
+    item = make_media_item("A", "GX010002.MP4", 4)
     state_file = tmp_path / "state.json"
     downloads = tmp_path / "downloads"
     create_or_update_state(state_file, manifest_for_state([item]))
@@ -99,7 +99,7 @@ def test_sync_state_with_downloads_finds_case_variant_nested_media_files(
     tmp_path: Path,
     make_media_item,
 ) -> None:
-    item = make_media_item("A", "GX010002.MP4", 50)
+    item = make_media_item("A", "GX010002.MP4", 4)
     state_file = tmp_path / "state.json"
     downloads = tmp_path / "downloads"
     create_or_update_state(state_file, manifest_for_state([item]))
@@ -111,6 +111,53 @@ def test_sync_state_with_downloads_finds_case_variant_nested_media_files(
 
     assert changes == [{"id": "A", "filename": item.filename, "status": "found"}]
     assert state["media"][item.key]["download_status"] == STATUS_DOWNLOADED
+
+
+def test_sync_state_with_downloads_does_not_mark_size_mismatched_file_downloaded(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    item = make_media_item("A", "GX010002.MP4", 50)
+    state_file = tmp_path / "state.json"
+    downloads = tmp_path / "downloads"
+    create_or_update_state(state_file, manifest_for_state([item]))
+
+    media_download_path(downloads, item.filename).parent.mkdir(parents=True)
+    media_download_path(downloads, item.filename).write_text(
+        "short", encoding="utf-8"
+    )
+    state, changes = sync_state_with_downloads(state_file, downloads)
+
+    assert changes == []
+    assert state["media"][item.key]["download_status"] == STATUS_PENDING
+
+
+def test_sync_state_with_downloads_reverts_size_mismatched_downloaded_file(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    item = make_media_item("A", "GX010002.MP4", 50)
+    state_file = tmp_path / "state.json"
+    downloads = tmp_path / "downloads"
+    create_or_update_state(state_file, manifest_for_state([item]))
+
+    media_download_path(downloads, item.filename).parent.mkdir(parents=True)
+    media_download_path(downloads, item.filename).write_text(
+        "x" * 50, encoding="utf-8"
+    )
+    state, _ = sync_state_with_downloads(state_file, downloads)
+    assert state["media"][item.key]["download_status"] == STATUS_DOWNLOADED
+
+    media_download_path(downloads, item.filename).write_text(
+        "truncated", encoding="utf-8"
+    )
+    state, changes = sync_state_with_downloads(state_file, downloads)
+
+    assert changes == [
+        {"id": "A", "filename": item.filename, "status": "size_mismatch"}
+    ]
+    assert state["media"][item.key]["download_status"] == STATUS_PENDING
+    assert "size mismatch" in state["media"][item.key]["last_error"].lower()
 
 
 def test_media_file_exists_rejects_parent_directory_traversal(

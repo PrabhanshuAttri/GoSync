@@ -104,11 +104,11 @@ def save_state(state_file: Path, state: dict[str, Any]) -> None:
     _write_json(state_file, state)
 
 
-def downloaded_filename_index(output_dir: Path) -> set[str]:
+def downloaded_filename_index(output_dir: Path) -> dict[str, int]:
     if not output_dir.exists():
-        return set()
+        return {}
     return {
-        path.name.casefold()
+        path.name.casefold(): path.stat().st_size
         for path in output_dir.rglob("*")
         if safe_child_path(output_dir, path)
         and path.is_file()
@@ -120,20 +120,43 @@ def _is_safe_child_path(base_dir: Path, candidate: Path) -> bool:
     return safe_child_path(base_dir, candidate)
 
 
+def _size_matches(actual_size: int, expected_size: int | None) -> bool:
+    # expected_size is only known when the API reported a file_size for this
+    # media item; without it we can't detect a mismatch, so fall back to
+    # existence alone.
+    return expected_size is None or actual_size == expected_size
+
+
+def _locate_media_file_size(
+    output_dir: Path,
+    filename: str,
+    existing_filenames: dict[str, int] | None = None,
+) -> int | None:
+    """Return the on-disk size of filename within output_dir, or None if not found."""
+    if existing_filenames is None:
+        existing_filenames = downloaded_filename_index(output_dir)
+
+    media_path = media_download_path(output_dir, filename)
+    if _is_safe_child_path(output_dir, media_path) and media_path.is_file():
+        return media_path.stat().st_size
+
+    legacy_path = output_dir / filename
+    if _is_safe_child_path(output_dir, legacy_path) and legacy_path.is_file():
+        return legacy_path.stat().st_size
+
+    return existing_filenames.get(filename.casefold())
+
+
 def media_file_exists(
     output_dir: Path,
     filename: str,
-    existing_filenames: set[str] | None = None,
+    existing_filenames: dict[str, int] | None = None,
+    expected_size: int | None = None,
 ) -> bool:
-    if existing_filenames is None:
-        existing_filenames = downloaded_filename_index(output_dir)
-    media_path = media_download_path(output_dir, filename)
-    legacy_path = output_dir / filename
-    return (
-        (_is_safe_child_path(output_dir, media_path) and media_path.is_file())
-        or (_is_safe_child_path(output_dir, legacy_path) and legacy_path.is_file())
-        or filename.casefold() in existing_filenames
-    )
+    actual_size = _locate_media_file_size(output_dir, filename, existing_filenames)
+    if actual_size is None:
+        return False
+    return _size_matches(actual_size, expected_size)
 
 
 def sync_state_with_downloads(
@@ -155,7 +178,10 @@ def sync_state_with_downloads(
         if not filename:
             continue
 
-        exists = media_file_exists(output_dir, filename, existing_filenames)
+        expected_size = record.get("file_size")
+        expected_size = expected_size if isinstance(expected_size, int) else None
+        actual_size = _locate_media_file_size(output_dir, filename, existing_filenames)
+        exists = actual_size is not None and _size_matches(actual_size, expected_size)
         current_status = str(record.get("download_status") or STATUS_PENDING)
         if exists and current_status != STATUS_DOWNLOADED:
             record["download_status"] = STATUS_DOWNLOADED
@@ -169,11 +195,17 @@ def sync_state_with_downloads(
             )
         elif not exists and current_status == STATUS_DOWNLOADED:
             record["download_status"] = STATUS_PENDING
+            size_mismatch = actual_size is not None and expected_size is not None
+            if size_mismatch:
+                record["last_error"] = (
+                    f"File size mismatch: expected {expected_size} bytes, "
+                    f"found {actual_size} bytes"
+                )
             changed.append(
                 {
                     "id": str(record.get("id") or ""),
                     "filename": filename,
-                    "status": "missing",
+                    "status": "size_mismatch" if size_mismatch else "missing",
                 }
             )
 

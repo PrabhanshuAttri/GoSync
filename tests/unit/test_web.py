@@ -139,7 +139,9 @@ def test_update_sidecars_starts_sidecar_and_telemetry_threads_forced(
     write_sample_har(tmp_path / "gopro.com.har")
     downloaded_path = tmp_path / "downloads" / "mp4" / "GX010001.MP4"
     downloaded_path.parent.mkdir(parents=True)
-    downloaded_path.write_text("fake media", encoding="utf-8")
+    # GX010001.MP4's declared file_size in the sample HAR is 100 bytes; sync
+    # only marks a file downloaded when the on-disk size matches.
+    downloaded_path.write_text("f" * 100, encoding="utf-8")
     app = web.create_app(web_args(tmp_path))
 
     response = app.test_client().post("/update-sidecars", data={})
