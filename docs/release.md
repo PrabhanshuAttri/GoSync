@@ -33,8 +33,10 @@ ghcr.io/prabhanshuattri/gosync:sha-<commit>
 When you want a stable release, update every release-facing version reference:
 
 - `src/gosync/__init__.py`
-- `README.md`
+- `setup.py`
 - any release notes or docs that mention the current version
+
+`README.md` and `docs/usage.md` use the `latest` image tag and do not need a version bump.
 
 The GHCR publishing workflow reads the package version from `src/gosync/__init__.py` and
 passes it into the image build as `GOSYNC_VERSION`.
@@ -52,7 +54,7 @@ Commit the release changes:
 
 ```bash
 git status
-git add README.md src/gosync/__init__.py docs/release.md
+git add src/gosync/__init__.py setup.py docs/release.md
 git commit -m "Release GoSync <version>"
 git push origin main
 ```

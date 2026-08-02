@@ -1,6 +1,7 @@
 (function () {
   const settingsKey = "gosync-media-table-settings";
   const extensionFilter = document.getElementById("extension-filter");
+  const statusFilter = document.getElementById("status-filter");
   const selectVisible = document.getElementById("select-visible");
   const selectionSummary = document.getElementById("selection-summary");
   const filesPerBatchInput = document.getElementById("files-per-batch");
@@ -8,7 +9,7 @@
   const tableBody = document.getElementById("sidecar-table-body");
   const tableWrap = tableBody?.closest(".table-wrap");
 
-  if (!extensionFilter || !selectVisible || !selectionSummary || !tableBody) {
+  if (!extensionFilter || !statusFilter || !selectVisible || !selectionSummary || !tableBody) {
     return;
   }
 
@@ -24,6 +25,7 @@
   let sidecarItems = [];
   let lastItemsSignature = "";
   let requestedExtensionFilter = restoredSettings.extensionFilter || "";
+  let requestedStatusFilter = restoredSettings.statusFilter || "";
   let pendingScrollTop = Number(restoredSettings.tableScrollTop) || 0;
   let pendingScrollLeft = Number(restoredSettings.tableScrollLeft) || 0;
   let scrollSaveTimer = null;
@@ -31,7 +33,7 @@
     ? new Set(restoredSettings.selectedKeys)
     : null;
   let mediaSort = {
-    key: ["size", "status"].includes(restoredSettings.sortKey)
+    key: ["size", "status", "captured_at"].includes(restoredSettings.sortKey)
       ? restoredSettings.sortKey
       : "status",
     direction: ["asc", "desc"].includes(restoredSettings.sortDirection)
@@ -51,6 +53,7 @@
         sortKey: mediaSort.key,
         sortDirection: mediaSort.direction,
         extensionFilter: extensionFilter.value,
+        statusFilter: statusFilter.value,
         filesPerBatch: filesPerBatchInput?.value || "",
         tableScrollTop: tableWrap?.scrollTop || 0,
         tableScrollLeft: tableWrap?.scrollLeft || 0,
@@ -64,6 +67,7 @@
       item.filename || "",
       item.sidecar_filename || "",
       item.file_size ?? null,
+      item.captured_at || "",
       item.status || "",
     ])
   );
@@ -77,7 +81,7 @@
       value /= 1024;
       index += 1;
     }
-    return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
+    return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
   };
 
   const mediaExtension = (filename) => {
@@ -114,10 +118,68 @@
     extensionFilter.disabled = extensions.length < 2;
   };
 
+  const statusLabels = {
+    downloading: "Downloading",
+    downloaded: "Downloaded",
+    pending: "Pending",
+  };
+
+  const syncStatusFilterOptions = () => {
+    const selected = statusFilter.value || requestedStatusFilter;
+    const statuses = Array.from(
+      new Set(sidecarItems.map((item) => item.status).filter(Boolean))
+    ).sort((a, b) => statusRank(a) - statusRank(b));
+
+    statusFilter.replaceChildren();
+    const allOption = document.createElement("option");
+    allOption.value = "";
+    allOption.textContent = "All statuses";
+    statusFilter.append(allOption);
+
+    statuses.forEach((status) => {
+      const option = document.createElement("option");
+      option.value = status;
+      option.textContent = statusLabels[status] || status;
+      statusFilter.append(option);
+    });
+
+    statusFilter.value = !selected || statuses.includes(selected) ? selected : "";
+    requestedStatusFilter = statusFilter.value;
+    statusFilter.disabled = statuses.length < 2;
+  };
+
   const formatFileSize = (value) => {
     const bytes = Number(value);
     if (!Number.isFinite(bytes) || bytes <= 0) return "Unknown";
     return formatBytes(bytes);
+  };
+
+  const parseCapturedAt = (value) => {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
+
+  const formatCapturedDate = (value) => {
+    const date = parseCapturedAt(value);
+    if (!date) return "Unknown";
+    return date.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  };
+
+  const formatCapturedDateTime = (value) => {
+    const date = parseCapturedAt(value);
+    if (!date) return "Unknown capture date";
+    return date.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   };
 
   const statusRank = (status) => {
@@ -132,6 +194,11 @@
     return Number.isFinite(bytes) && bytes > 0 ? bytes : -1;
   };
 
+  const capturedAtValue = (item) => {
+    const time = new Date(item.captured_at || "").getTime();
+    return Number.isFinite(time) && !Number.isNaN(time) ? time : -1;
+  };
+
   const compareMediaItems = (a, b) => {
     let result = 0;
     if (mediaSort.key === "size") {
@@ -140,6 +207,12 @@
       if (aSize < 0 && bSize >= 0) result = 1;
       else if (aSize >= 0 && bSize < 0) result = -1;
       else result = (aSize - bSize) * (mediaSort.direction === "asc" ? 1 : -1);
+    } else if (mediaSort.key === "captured_at") {
+      const aTime = capturedAtValue(a);
+      const bTime = capturedAtValue(b);
+      if (aTime < 0 && bTime >= 0) result = 1;
+      else if (aTime >= 0 && bTime < 0) result = -1;
+      else result = (aTime - bTime) * (mediaSort.direction === "asc" ? 1 : -1);
     } else {
       result = (
         statusRank(a.status) - statusRank(b.status)
@@ -159,15 +232,21 @@
     });
   };
 
-  const visibleSelectableItems = () => {
+  const matchesFilters = (item) => {
     const selectedExtension = extensionFilter.value;
-    return sidecarItems.filter((item) => {
-      const visible = selectedExtension
-        ? mediaExtension(item.filename) === selectedExtension
-        : true;
-      return visible && item.status !== "downloaded" && item.key;
-    });
+    const selectedStatus = statusFilter.value;
+    const extensionMatches = selectedExtension
+      ? mediaExtension(item.filename) === selectedExtension
+      : true;
+    const statusMatches = selectedStatus ? item.status === selectedStatus : true;
+    return extensionMatches && statusMatches;
   };
+
+  const visibleSelectableItems = () => (
+    sidecarItems.filter((item) => (
+      matchesFilters(item) && item.status !== "downloaded" && item.key
+    ))
+  );
 
   const pendingKeys = () => (
     sidecarItems
@@ -196,18 +275,15 @@
   const render = () => {
     const previousScrollTop = tableWrap?.scrollTop || pendingScrollTop;
     const previousScrollLeft = tableWrap?.scrollLeft || pendingScrollLeft;
-    const selectedExtension = extensionFilter.value;
-    const items = selectedExtension
-      ? sidecarItems.filter((item) => mediaExtension(item.filename) === selectedExtension)
-      : sidecarItems;
+    const items = sidecarItems.filter(matchesFilters);
     const sortedItems = [...items].sort(compareMediaItems);
 
     if (!sidecarItems.length) {
-      tableBody.innerHTML = '<tr><td colspan="5" class="empty-cell">No media found.</td></tr>';
+      tableBody.innerHTML = '<tr><td colspan="6" class="empty-cell">No media found.</td></tr>';
       return;
     }
     if (!items.length) {
-      tableBody.innerHTML = '<tr><td colspan="5" class="empty-cell">No media matches this filter.</td></tr>';
+      tableBody.innerHTML = '<tr><td colspan="6" class="empty-cell">No media matches this filter.</td></tr>';
       return;
     }
 
@@ -219,6 +295,7 @@
       const filename = document.createElement("td");
       const sidecar = document.createElement("td");
       const size = document.createElement("td");
+      const capturedAt = document.createElement("td");
       const statusCell = document.createElement("td");
       const status = document.createElement("span");
       const downloaded = isDownloaded(item);
@@ -252,12 +329,14 @@
       sidecar.title = item.sidecar_filename;
       size.textContent = formatFileSize(item.file_size);
       size.title = item.file_size ? `${item.file_size} bytes` : "Unknown size";
+      capturedAt.textContent = formatCapturedDate(item.captured_at);
+      capturedAt.title = formatCapturedDateTime(item.captured_at);
       status.className = `table-status ${item.status}`;
       status.textContent = item.status;
 
       selectCell.append(checkbox);
       statusCell.append(status);
-      row.append(selectCell, filename, sidecar, size, statusCell);
+      row.append(selectCell, filename, sidecar, size, capturedAt, statusCell);
       tableBody.append(row);
     });
     if (tableWrap) {
@@ -309,6 +388,11 @@
     saveSettings();
     render();
   });
+  statusFilter.addEventListener("change", () => {
+    requestedStatusFilter = statusFilter.value;
+    saveSettings();
+    render();
+  });
 
   window.gosyncMediaTable = {
     startFormData(form) {
@@ -353,6 +437,7 @@
         );
       }
       syncExtensionFilterOptions();
+      syncStatusFilterOptions();
       syncSortButtons();
       render();
       saveSettings();

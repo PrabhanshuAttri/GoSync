@@ -52,6 +52,12 @@ def create_or_update_state(
             previous = {}
 
         download_status = str(previous.get("download_status") or STATUS_PENDING)
+        captured_at = (
+            item.metadata.get("captured_at")
+            or item.metadata.get("created_at")
+            or item.metadata.get("submitted_at")
+            or ""
+        )
 
         media_records[item.key] = {
             "key": item.key,
@@ -59,6 +65,7 @@ def create_or_update_state(
             "filename": item.filename,
             "sidecar_filename": item.sidecar_filename,
             "file_size": item.file_size,
+            "captured_at": captured_at,
             "download_status": download_status,
             "sidecar_status": str(previous.get("sidecar_status") or STATUS_PENDING),
             "retry_count": int(previous.get("retry_count") or 0),

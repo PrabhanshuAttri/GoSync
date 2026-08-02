@@ -194,6 +194,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                     "filename": filename,
                     "sidecar_filename": sidecar_filename,
                     "file_size": record.get("file_size"),
+                    "captured_at": str(record.get("captured_at") or ""),
                     "status": status,
                 }
             )
