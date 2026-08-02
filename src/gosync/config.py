@@ -4,13 +4,14 @@ from pathlib import Path
 
 from gosync import __version__
 from gosync.constants import (
-    DEFAULT_DATA_DIR as FALLBACK_DATA_DIR,
-)
-from gosync.constants import (
+    AUTH_METHOD_HAR,
     DEFAULT_DOWNLOAD_FOLDER,
     DEFAULT_FFMPEG_BINARY,
     DEFAULT_FFMPEG_TIMEOUT_SECONDS,
     DEFAULT_STATE_FILE,
+)
+from gosync.constants import (
+    DEFAULT_DATA_DIR as FALLBACK_DATA_DIR,
 )
 
 ENV = os.getenv("ENV", "production").lower()
@@ -24,6 +25,21 @@ DEFAULT_OUTPUT_FOLDER = os.getenv(
 DEFAULT_STATE_PATH = os.getenv("GOSYNC_STATE_FILE", DEFAULT_STATE_FILE)
 DEFAULT_BATCH_MAX_BYTES = os.getenv("BATCH_MAX_BYTES", "auto")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
+DEFAULT_AUTH_METHOD = os.getenv("AUTH_METHOD", AUTH_METHOD_HAR).strip().lower()
+DEFAULT_AUTH_TOKEN = os.getenv("AUTH_TOKEN", "")
+DEFAULT_USER_ID = os.getenv("USER_ID", "")
+DOWNLOAD_TELEMETRY = os.getenv("DOWNLOAD_TELEMETRY", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CREATE_XMP_SIDECARS = os.getenv("CREATE_XMP_SIDECARS", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", DEFAULT_FFMPEG_BINARY)
 FFMPEG_TIMEOUT_SECONDS = int(
     os.getenv("FFMPEG_TIMEOUT_SECONDS", str(DEFAULT_FFMPEG_TIMEOUT_SECONDS))
@@ -56,6 +72,47 @@ def parse_args() -> argparse.Namespace:
         help=(
             "HAR filename inside data-dir. Defaults to gopro.com.har, then any "
             "single *.har file."
+        ),
+    )
+    parser.add_argument(
+        "--auth-method",
+        default=DEFAULT_AUTH_METHOD,
+        choices=["har", "api_token"],
+        help=(
+            "How to authenticate against GoPro Cloud: 'har' (default, export a "
+            "browser HAR) or 'api_token' (paste a captured bearer token)."
+        ),
+    )
+    parser.add_argument(
+        "--auth-token",
+        default=DEFAULT_AUTH_TOKEN or None,
+        help="GoPro bearer token. Required when --auth-method=api_token.",
+    )
+    parser.add_argument(
+        "--user-id",
+        default=DEFAULT_USER_ID or None,
+        help=(
+            "Optional GoPro account/user id used to scope --auth-method=api_token "
+            "media searches."
+        ),
+    )
+    parser.add_argument(
+        "--download-telemetry",
+        action="store_true",
+        default=DOWNLOAD_TELEMETRY,
+        help=(
+            "Also fetch per-item mediainfo.json and GPX/GPMF telemetry "
+            "sidecars. Off by default -- adds extra live API calls per item."
+        ),
+    )
+    parser.add_argument(
+        "--no-create-xmp-sidecars",
+        dest="create_xmp_sidecars",
+        action="store_false",
+        default=CREATE_XMP_SIDECARS,
+        help=(
+            "Skip generating Immich-compatible XMP sidecar files next to "
+            "each downloaded media file. On by default."
         ),
     )
     parser.add_argument(

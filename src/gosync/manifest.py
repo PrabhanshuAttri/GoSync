@@ -6,7 +6,17 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from gosync.constants import MEDIA_LIST_KEYS, MEDIA_SEARCH_URL
+import requests
+
+from gosync.config import REQUEST_TIMEOUT
+from gosync.constants import (
+    API_JSON_ACCEPT,
+    API_JSON_USER_AGENT,
+    API_MEDIA_SEARCH_FIELDS,
+    API_MEDIA_SEARCH_PER_PAGE,
+    MEDIA_LIST_KEYS,
+    MEDIA_SEARCH_URL,
+)
 
 LOGGER = logging.getLogger("gosync.manifest")
 
@@ -221,40 +231,23 @@ def _to_media_item(
     )
 
 
-def read_manifest_from_har(har_path: Path) -> MediaManifest:
-    try:
-        with har_path.open("r", encoding="utf-8", errors="ignore") as file:
-            har_data = json.load(file)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"HAR file not found: {har_path}") from None
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Failed to parse HAR file as JSON: {exc}") from exc
-
-    entries = har_data.get("log", {}).get("entries")
-    if not isinstance(entries, list):
-        raise ValueError("Invalid HAR file structure: missing log.entries")
-
+def build_manifest_from_pages(
+    pages: list[tuple[str, list[dict[str, Any]]]],
+    matching_entries: int | None = None,
+) -> MediaManifest:
+    """Build a deduplicated MediaManifest from (request_url, raw_media_dicts)
+    pages. Source-agnostic: pages may come from parsing a HAR file or from
+    paginating the live /media/search API -- both yield the same GoPro
+    response shape."""
     media_items: list[MediaItem] = []
     duplicates: list[DuplicateMediaItem] = []
     media_responses: list[dict[str, Any]] = []
     seen: set[str] = set()
-    matching_entries = 0
     unnamed_count = 0
 
-    for entry in entries:
-        request = entry.get("request", {})
-        url = request.get("url", "")
-        if MEDIA_SEARCH_URL not in url:
-            continue
-
-        matching_entries += 1
-        text = entry.get("response", {}).get("content", {}).get("text", "")
-        response_json = parse_response_text(text, matching_entries)
-        if response_json is None:
-            continue
-
+    for entry_number, (url, raw_items) in enumerate(pages, start=1):
         response_media: list[dict[str, Any]] = []
-        for metadata in extract_media_items(response_json):
+        for metadata in raw_items:
             media_item, generated_filename = _to_media_item(
                 metadata,
                 unnamed_count + 1,
@@ -286,24 +279,131 @@ def read_manifest_from_har(har_path: Path) -> MediaManifest:
 
         media_responses.append(
             {
-                "entry_number": matching_entries,
+                "entry_number": entry_number,
                 "request_url": str(url),
                 "media_count": len(response_media),
                 "media": response_media,
             }
         )
 
-    if matching_entries == 0:
-        raise ValueError(f"No API calls to {MEDIA_SEARCH_URL} found in HAR file")
     if not media_items:
         raise ValueError("No media file metadata found in media/search responses")
 
     return MediaManifest(
         media=media_items,
         duplicates=duplicates,
-        matching_entries=matching_entries,
+        matching_entries=len(pages) if matching_entries is None else matching_entries,
         media_responses=media_responses,
     )
+
+
+def _pages_from_har(
+    har_path: Path,
+) -> tuple[list[tuple[str, list[dict[str, Any]]]], int]:
+    try:
+        with har_path.open("r", encoding="utf-8", errors="ignore") as file:
+            har_data = json.load(file)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"HAR file not found: {har_path}") from None
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse HAR file as JSON: {exc}") from exc
+
+    entries = har_data.get("log", {}).get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("Invalid HAR file structure: missing log.entries")
+
+    pages: list[tuple[str, list[dict[str, Any]]]] = []
+    matching_entries = 0
+
+    for entry in entries:
+        request = entry.get("request", {})
+        url = request.get("url", "")
+        if MEDIA_SEARCH_URL not in url:
+            continue
+
+        matching_entries += 1
+        text = entry.get("response", {}).get("content", {}).get("text", "")
+        response_json = parse_response_text(text, matching_entries)
+        if response_json is None:
+            continue
+
+        pages.append((str(url), extract_media_items(response_json)))
+
+    if matching_entries == 0:
+        raise ValueError(f"No API calls to {MEDIA_SEARCH_URL} found in HAR file")
+
+    return pages, matching_entries
+
+
+def read_manifest_from_har(har_path: Path) -> MediaManifest:
+    pages, matching_entries = _pages_from_har(har_path)
+    return build_manifest_from_pages(pages, matching_entries=matching_entries)
+
+
+def json_api_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Adapt the pipeline's request headers for GoPro's JSON media API
+    (media/search, media/{id}, media/{id}/download).
+
+    Keeps whatever Authorization/Cookie step 1 resolved -- from a HAR capture
+    or a directly-provided bearer token, either way -- and only overrides
+    the Accept/Content-Type/User-Agent fields to the values confirmed working
+    against these JSON endpoints, since the zip-export endpoint (what the
+    rest of the pipeline's `headers` dict is otherwise tuned for) expects a
+    different Accept.
+    """
+    return {
+        **headers,
+        "Accept": API_JSON_ACCEPT,
+        "Content-Type": "application/json",
+        "User-Agent": API_JSON_USER_AGENT,
+    }
+
+
+def _pages_from_live_api(
+    headers: dict[str, str],
+    user_id: str | None = None,
+    per_page: int = API_MEDIA_SEARCH_PER_PAGE,
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Paginate GoPro's live /media/search endpoint for the whole account."""
+    pages: list[tuple[str, list[dict[str, Any]]]] = []
+    page_number = 1
+    request_headers = json_api_headers(headers)
+
+    while True:
+        params: dict[str, str | int] = {
+            "fields": API_MEDIA_SEARCH_FIELDS,
+            "page": page_number,
+            "per_page": per_page,
+        }
+        if user_id:
+            params["gopro_user_id"] = user_id
+
+        response = requests.get(
+            MEDIA_SEARCH_URL,
+            headers=request_headers,
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        response_json = response.json()
+        pages.append((response.url, extract_media_items(response_json)))
+
+        total_pages = response_json.get("_pages", {}).get("total_pages", page_number)
+        if page_number >= total_pages:
+            break
+        page_number += 1
+
+    return pages
+
+
+def read_manifest_from_api(
+    headers: dict[str, str],
+    user_id: str | None = None,
+) -> MediaManifest:
+    pages = _pages_from_live_api(headers, user_id)
+    if not pages:
+        raise ValueError(f"No responses from {MEDIA_SEARCH_URL}")
+    return build_manifest_from_pages(pages)
 
 
 def write_manifest(

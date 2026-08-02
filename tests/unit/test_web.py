@@ -3,8 +3,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from gosync import web
+from gosync.auth import AuthConfig
+from gosync.constants import AUTH_METHOD_API_TOKEN
 from gosync.events import RECENT_EVENTS, log_event
+from gosync.manifest import MediaManifest
 from gosync.progress import ProgressState
+from gosync.runtime import PreparedManifestState, RuntimePaths
+
+
+def start_button_disabled(page: str) -> bool:
+    start = page.index('id="start-button"')
+    tag_end = page.index(">", start)
+    return "disabled" in page[start:tag_end]
 
 
 class FakeThread:
@@ -41,6 +51,7 @@ def reset_web_state(monkeypatch) -> None:
     monkeypatch.setattr(web, "PROGRESS", ProgressState())
     monkeypatch.setattr(web, "JOB_THREAD", None)
     monkeypatch.setattr(web, "SIDECAR_THREAD", None)
+    monkeypatch.setattr(web, "TELEMETRY_THREAD", None)
     monkeypatch.setattr(web, "RESUME_CACHE", {})
     monkeypatch.setattr(web, "MEDIA_ID_CACHE", {})
 
@@ -63,6 +74,7 @@ def test_start_uses_selected_media_keys_and_files_per_batch(
                 "NOPQRSTUVWXYZ_GX010002.JPG",
             ],
             "files_per_batch": "2",
+            "create_xmp_sidecars": "on",
         },
     )
 
@@ -72,12 +84,13 @@ def test_start_uses_selected_media_keys_and_files_per_batch(
         for thread in FakeThread.instances
         if thread.target.__name__ == "run_download_job"
     )
-    sidecar_thread = next(
-        thread
-        for thread in FakeThread.instances
-        if thread.target.__name__ == "run_sidecar_job"
-    )
 
+    # XMP/telemetry generation now happens inside run_download_job itself
+    # (sequenced before the media download), not as a separate thread --
+    # see test_runtime.py for coverage of that internal ordering.
+    assert not any(
+        thread.target.__name__ == "run_sidecar_job" for thread in FakeThread.instances
+    )
     assert download_thread.started
     assert download_thread.args[3] == {
         "ABCDEFGHIJKLM_GX010001.MP4",
@@ -86,11 +99,115 @@ def test_start_uses_selected_media_keys_and_files_per_batch(
     assert download_thread.args[4] == 2
     assert isinstance(download_thread.args[5], str)
     assert download_thread.args[5]
-    assert [item.key for item in sidecar_thread.args[3]] == [
-        "ABCDEFGHIJKLM_GX010001.MP4",
-        "NOPQRSTUVWXYZ_GX010002.JPG",
-    ]
-    assert sidecar_thread.args[5] == download_thread.args[5]
+
+
+def test_start_skips_sidecar_thread_when_checkbox_unchecked(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har")
+    app = web.create_app(web_args(tmp_path))
+
+    response = app.test_client().post(
+        "/start",
+        data={
+            "har_file": "gopro.com.har",
+            "selected_media_mode": "all_pending",
+        },
+    )
+
+    assert response.status_code == 302
+    assert not any(
+        thread.target.__name__ == "run_sidecar_job" for thread in FakeThread.instances
+    )
+    assert any(
+        thread.target.__name__ == "run_download_job" for thread in FakeThread.instances
+    )
+    assert web.PROGRESS.snapshot()["sidecar_message"] == (
+        "XMP sidecar generation disabled."
+    )
+
+
+def test_update_sidecars_starts_sidecar_and_telemetry_threads_forced(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har")
+    downloaded_path = tmp_path / "downloads" / "mp4" / "GX010001.MP4"
+    downloaded_path.parent.mkdir(parents=True)
+    downloaded_path.write_text("fake media", encoding="utf-8")
+    app = web.create_app(web_args(tmp_path))
+
+    response = app.test_client().post("/update-sidecars", data={})
+
+    assert response.status_code == 302
+    # Telemetry (forced refetch) and XMP generation run sequentially inside
+    # one thread now, not two racing ones -- see run_metadata_update_job.
+    update_thread = next(
+        thread
+        for thread in FakeThread.instances
+        if thread.target.__name__ == "run_metadata_update_job"
+    )
+    assert update_thread.started
+    # (headers, media_items, output_dir, har_path, state_file, progress, job_id)
+    # Only the already-downloaded item is included, not all 3 in the HAR.
+    assert [item.filename for item in update_thread.args[1]] == ["GX010001.MP4"]
+
+
+def test_update_sidecars_rejects_when_nothing_downloaded_yet(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har")
+    app = web.create_app(web_args(tmp_path))
+
+    response = app.test_client().post("/update-sidecars", data={})
+
+    assert response.status_code == 302
+    assert FakeThread.instances == []
+    assert web.PROGRESS.message == "No downloaded media to update sidecars for"
+
+
+def test_update_sidecars_rejects_when_no_auth_configured(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    app = web.create_app(web_args(tmp_path))
+
+    response = app.test_client().post("/update-sidecars", data={})
+
+    assert response.status_code == 302
+    assert FakeThread.instances == []
+    assert web.PROGRESS.message == "No HAR file or API token configured"
+
+
+def test_update_sidecars_rejects_while_job_running(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har")
+    app = web.create_app(web_args(tmp_path))
+
+    class RunningThread:
+        def is_alive(self) -> bool:
+            return True
+
+    monkeypatch.setattr(web, "JOB_THREAD", RunningThread())
+
+    response = app.test_client().post("/update-sidecars", data={})
+
+    assert response.status_code == 302
+    assert FakeThread.instances == []
+    assert web.PROGRESS.message == "A job is already running"
 
 
 def test_start_rejects_empty_media_selection(
@@ -263,6 +380,153 @@ def test_upload_does_not_mutate_shared_args_har_file(
 
     assert response.status_code == 302
     assert args.har_file is None
+
+
+def test_settings_infers_api_token_method_when_token_and_user_id_filled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    app = web.create_app(web_args(tmp_path))
+    client = app.test_client()
+
+    response = client.post(
+        "/settings",
+        data={
+            "auth_token": "abc123",
+            "user_id": "user-1",
+            "download_telemetry": "on",
+        },
+    )
+
+    assert response.status_code == 302
+    page = client.get("/").get_data(as_text=True)
+    assert not start_button_disabled(page)
+    assert "Saved (blank keeps it)" in page
+
+
+def test_settings_falls_back_to_har_when_user_id_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    app = web.create_app(web_args(tmp_path))
+    client = app.test_client()
+
+    response = client.post("/settings", data={"auth_token": "abc123"})
+
+    assert response.status_code == 302
+    page = client.get("/").get_data(as_text=True)
+    assert start_button_disabled(page)
+
+
+def test_settings_blank_token_keeps_previously_saved_token(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    app = web.create_app(web_args(tmp_path))
+    client = app.test_client()
+
+    client.post("/settings", data={"auth_token": "abc123", "user_id": "user-1"})
+    response = client.post(
+        "/settings",
+        data={"user_id": "user-1", "download_telemetry": "on"},
+    )
+
+    assert response.status_code == 302
+    page = client.get("/").get_data(as_text=True)
+    assert not start_button_disabled(page)
+
+
+def test_start_without_har_or_token_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    app = web.create_app(web_args(tmp_path))
+    client = app.test_client()
+
+    response = client.post("/start", data={})
+
+    assert response.status_code == 302
+    assert FakeThread.instances == []
+    assert web.PROGRESS.message == "No HAR file selected"
+
+
+def test_start_with_token_and_user_id_uses_api_token_mode(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    app = web.create_app(web_args(tmp_path))
+    client = app.test_client()
+
+    item = make_media_item("A", "clip.mp4", 10)
+    manifest = MediaManifest(
+        media=[item], duplicates=[], matching_entries=1, media_responses=[]
+    )
+
+    def fake_prepare(args, har_file=None, progress=None):
+        assert args.auth_method == AUTH_METHOD_API_TOKEN
+        paths = RuntimePaths(
+            data_dir=tmp_path,
+            har_path=None,
+            output_dir=tmp_path / "downloads",
+            state_file=tmp_path / "state.json",
+            manifest_file=tmp_path / "manifest.json",
+            media_dump_file=tmp_path / "media_search.json",
+            auth=AuthConfig(
+                method=AUTH_METHOD_API_TOKEN, auth_token="abc123", user_id="user-1"
+            ),
+        )
+        return PreparedManifestState(
+            paths=paths, manifest=manifest, state={"media": {}}, sync_changes=[]
+        )
+
+    monkeypatch.setattr(web, "prepare_runtime_manifest_state", fake_prepare)
+
+    response = client.post(
+        "/start",
+        data={
+            "auth_token": "abc123",
+            "user_id": "user-1",
+            "selected_media_keys": [item.key],
+        },
+    )
+
+    assert response.status_code == 302
+    assert any(
+        thread.target.__name__ == "run_download_job" for thread in FakeThread.instances
+    )
+
+
+def test_start_handles_manifest_load_failure_gracefully(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har")
+    app = web.create_app(web_args(tmp_path))
+
+    def fake_prepare(args, har_file=None, progress=None):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(web, "prepare_runtime_manifest_state", fake_prepare)
+
+    response = app.test_client().post(
+        "/start",
+        data={"har_file": "gopro.com.har", "files_per_batch": "2"},
+    )
+
+    assert response.status_code == 302
+    assert FakeThread.instances == []
+    assert web.PROGRESS.message == "Could not load media for download"
+    event = web.PROGRESS.snapshot()["events"][-1]
+    assert event["event"] == "error.validation"
+    assert event["error_message"] == "boom"
 
 
 def test_current_events_endpoint_filters_to_current_job(

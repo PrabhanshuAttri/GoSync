@@ -52,6 +52,21 @@ The default name format is:
 
 If the filename already contains the extension, GoSync does not duplicate it.
 
+## Immich Compatibility
+
+Sidecars also write `exif:DateTimeOriginal`, set to the same capture timestamp
+as `xmp:CreateDate` (`captured_at`, falling back to `created_at` then
+`submitted_at`). Immich's date-taken lookup checks `exif:DateTimeOriginal`
+before `xmp:CreateDate` when scanning sidecars in an external library, so this
+keeps the asset's date correct there without changing the GoPro-specific
+fields. See https://docs.immich.app/features/xmp-sidecars/.
+
+GoPro's `media/search` payload has no GPS, description, rating, or
+tags/keywords fields, so the equivalent Immich tags (`exif:GPSLatitude`/
+`GPSLongitude`, `dc:description`, `xmp:Rating`, `digiKam:TagsList` /
+`lr:HierarchicalSubject` / `IPTC:Keywords`) are not written — there is no
+source data to populate them with.
+
 ## Field Selection
 
 Sidecars use a curated allowlist instead of writing every field returned by

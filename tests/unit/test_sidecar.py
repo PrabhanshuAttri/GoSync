@@ -1,31 +1,23 @@
+import json
 from pathlib import Path
 
 from gosync.paths import sidecar_output_path
 from gosync.sidecar import (
     build_xmp,
+    format_captured_datetime,
     generate_sidecars_from_har,
-    media_kind,
-    normalize_datetime,
-    sidecar_field_names,
+    geo_from_telemetry,
+    gps_altitude,
+    gps_dms,
     sidecar_stem,
     write_sidecars_for_manifest,
     xml_escape,
-    xmp_property_name,
 )
 
 
-def test_xml_helpers_escape_values_and_normalize_property_names() -> None:
+def test_xml_escape_escapes_ampersand_and_quotes() -> None:
     assert xml_escape('A&B "quote"') == "A&amp;B &quot;quote&quot;"
     assert xml_escape({"b": 2, "a": 1}) == "{&quot;a&quot;:1,&quot;b&quot;:2}"
-    assert xmp_property_name("captured_at_timezone") == "CapturedAtTimezone"
-    assert xmp_property_name("360_mode") == "Field360Mode"
-    assert xmp_property_name("---") == "Field"
-
-
-def test_normalize_datetime_converts_z_suffix() -> None:
-    assert normalize_datetime("2026-04-01T12:30:00Z") == "2026-04-01T12:30:00+00:00"
-    assert normalize_datetime("not-a-date") == "not-a-date"
-    assert normalize_datetime(None) == ""
 
 
 def test_sidecar_stem_does_not_duplicate_extension() -> None:
@@ -37,37 +29,109 @@ def test_sidecar_stem_does_not_duplicate_extension() -> None:
     )
 
 
-def test_media_kind_uses_content_type_type_and_extension() -> None:
-    assert media_kind({"content_type": "video/mp4"}) == "video"
-    assert media_kind({"type": "photo"}) == "image"
-    assert media_kind({"filename": "clip.360"}) == "video"
-    assert media_kind({"filename": "raw.gpr"}) == "image"
-    assert media_kind({"filename": "metadata.bin"}) == "media"
+def test_format_captured_datetime_converts_to_local_offset() -> None:
+    result = format_captured_datetime(
+        {"captured_at": "2026-07-11T23:32:32Z", "captured_at_timezone": "-10:00"}
+    )
+    assert result == "2026-07-11T13:32:32.000-10:00"
 
 
-def test_sidecar_fields_include_video_specific_fields_only_for_video() -> None:
-    assert "source_duration" in sidecar_field_names({"content_type": "video/mp4"})
-    assert "source_duration" not in sidecar_field_names({"content_type": "image/jpeg"})
+def test_format_captured_datetime_defaults_to_utc_without_timezone() -> None:
+    result = format_captured_datetime({"captured_at": "2026-04-01T12:30:00Z"})
+    assert result == "2026-04-01T12:30:00.000+00:00"
 
 
-def test_build_xmp_includes_safe_selected_fields_and_escapes_title() -> None:
+def test_format_captured_datetime_falls_back_through_dates() -> None:
+    assert format_captured_datetime({"created_at": "2026-04-01T12:30:00Z"}) == (
+        "2026-04-01T12:30:00.000+00:00"
+    )
+    assert format_captured_datetime({}) == ""
+
+
+def test_gps_dms_formats_degrees_minutes_and_hemisphere() -> None:
+    assert gps_dms(37.3375, "N", "S") == "37,20.250N"
+    assert gps_dms(-121.884, "E", "W") == "121,53.040W"
+
+
+def test_gps_altitude_returns_fraction_and_ref() -> None:
+    assert gps_altitude(25.0) == ("25000/1000", "0")
+    assert gps_altitude(-16.819) == ("16819/1000", "1")
+
+
+def test_geo_from_telemetry_reads_existing_mediainfo_json(tmp_path: Path) -> None:
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+    (json_dir / "GX010001_mediainfo.json").write_text(
+        json.dumps({"media": {"geoData": {"latitude": 1.0, "longitude": 2.0}}}),
+        encoding="utf-8",
+    )
+
+    geo = geo_from_telemetry(tmp_path, "GX010001.MP4")
+
+    assert geo == {"latitude": 1.0, "longitude": 2.0}
+
+
+def test_geo_from_telemetry_returns_none_when_missing(tmp_path: Path) -> None:
+    assert geo_from_telemetry(tmp_path, "GX010001.MP4") is None
+
+
+def test_build_xmp_includes_dates_tags_description_and_camera_model() -> None:
     xmp = build_xmp(
         {
             "filename": "GX010001.MP4",
-            "file_extension": "MP4",
-            "content_type": "video/mp4",
             "content_title": 'Surf & "Sun"',
             "captured_at": "2026-04-01T12:30:00Z",
-            "source_duration": 12.5,
+            "camera_model": "HERO11 Black",
+            "tags": "Vacation, Family",
             "private_token": "must not leak",
         }
     )
 
-    assert "xmp:CreateDate=\"2026-04-01T12:30:00+00:00\"" in xmp
-    assert "dc:format=\"video/mp4\"" in xmp
-    assert "Surf &amp; &quot;Sun&quot;" in xmp
-    assert "gopro:SourceDuration=\"12.5\"" in xmp
+    assert "<xmp:CreateDate>2026-04-01T12:30:00.000+00:00</xmp:CreateDate>" in xmp
+    assert (
+        "<exif:DateTimeOriginal>2026-04-01T12:30:00.000+00:00</exif:DateTimeOriginal>"
+        in xmp
+    )
+    assert (
+        "<photoshop:DateCreated>2026-04-01T12:30:00.000+00:00</photoshop:DateCreated>"
+        in xmp
+    )
+    assert "<dc:description>Surf &amp; &quot;Sun&quot;</dc:description>" in xmp
+    assert "<rdf:li>Vacation</rdf:li>" in xmp
+    assert "<rdf:li>Family</rdf:li>" in xmp
+    assert "<tiff:Make>GoPro</tiff:Make>" in xmp
+    assert "<tiff:Model>HERO11 Black</tiff:Model>" in xmp
+    assert "<rdf:li>GoPro HERO11 Black</rdf:li>" in xmp
     assert "private_token" not in xmp
+    assert "must not leak" not in xmp
+
+
+def test_build_xmp_adds_camera_model_tag_even_without_other_tags() -> None:
+    xmp = build_xmp({"filename": "GX010001.MP4", "camera_model": "HERO11 Black"})
+
+    assert "digiKam:TagsList" in xmp
+    assert "<rdf:li>GoPro HERO11 Black</rdf:li>" in xmp
+
+
+def test_build_xmp_omits_missing_fields() -> None:
+    xmp = build_xmp({"filename": "GX010001.MP4"})
+
+    assert "dc:description" not in xmp
+    assert "digiKam:TagsList" not in xmp
+    assert "exif:GPSLatitude" not in xmp
+    assert "tiff:Make" not in xmp
+
+
+def test_build_xmp_includes_gps_when_geo_provided() -> None:
+    xmp = build_xmp(
+        {"filename": "GX010001.MP4"},
+        geo={"latitude": 37.3375, "longitude": -121.884, "altitude": -16.819},
+    )
+
+    assert "<exif:GPSLatitude>37,20.250N</exif:GPSLatitude>" in xmp
+    assert "<exif:GPSLongitude>121,53.040W</exif:GPSLongitude>" in xmp
+    assert "<exif:GPSAltitude>16819/1000</exif:GPSAltitude>" in xmp
+    assert "<exif:GPSAltitudeRef>1</exif:GPSAltitudeRef>" in xmp
 
 
 def test_write_sidecars_for_manifest_places_files_next_to_media(
@@ -86,6 +150,25 @@ def test_write_sidecars_for_manifest_places_files_next_to_media(
     ).is_file()
 
 
+def test_write_sidecars_for_manifest_picks_up_existing_telemetry_geo(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    output_dir = tmp_path / "downloads"
+    json_dir = output_dir / "json"
+    json_dir.mkdir(parents=True)
+    (json_dir / "GX010001_mediainfo.json").write_text(
+        json.dumps({"media": {"geoData": {"latitude": 1.5, "longitude": 2.5}}}),
+        encoding="utf-8",
+    )
+    item = make_media_item("A", "GX010001.MP4", 100)
+
+    write_sidecars_for_manifest([item], output_dir)
+
+    sidecar_path = sidecar_output_path(output_dir, item.filename, item.sidecar_filename)
+    assert "exif:GPSLatitude" in sidecar_path.read_text(encoding="utf-8")
+
+
 def test_generate_sidecars_from_har_returns_written_count_and_matching_entries(
     tmp_path: Path,
     write_sample_har,
@@ -100,4 +183,3 @@ def test_generate_sidecars_from_har_returns_written_count_and_matching_entries(
 
     assert written == 3
     assert matching_entries == 1
-

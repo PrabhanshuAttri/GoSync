@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from gosync.auth import AuthConfig
+from gosync.constants import AUTH_METHOD_HAR
 from gosync.paths import media_download_path, sidecar_output_path
 from gosync.report import build_run_summary, write_run_report
 from gosync.runtime import prepare_manifest_state
@@ -20,7 +22,7 @@ def test_prepare_manifest_state_writes_manifest_media_dump_and_state(
     downloads = tmp_path / "downloads"
 
     manifest, state, changes = prepare_manifest_state(
-        har_path,
+        AuthConfig(method=AUTH_METHOD_HAR, har_path=har_path),
         downloads,
         state_file,
         manifest_file,
@@ -58,7 +60,7 @@ def test_resume_sync_detects_files_added_and_removed_after_prepare(
     state_file = tmp_path / "gosync_state.json"
     downloads = tmp_path / "downloads"
     prepare_manifest_state(
-        har_path,
+        AuthConfig(method=AUTH_METHOD_HAR, har_path=har_path),
         downloads,
         state_file,
         tmp_path / "manifest.json",
@@ -97,7 +99,7 @@ def test_sidecar_job_uses_manifest_items_and_updates_json_state(
     state_file = tmp_path / "gosync_state.json"
     downloads = tmp_path / "downloads"
     manifest, _state, _changes = prepare_manifest_state(
-        har_path,
+        AuthConfig(method=AUTH_METHOD_HAR, har_path=har_path),
         downloads,
         state_file,
         tmp_path / "manifest.json",
@@ -141,7 +143,7 @@ def test_run_summary_and_report_reflect_prepared_manifest_duplicates(
     state_file = tmp_path / "gosync_state.json"
     downloads = tmp_path / "downloads"
     manifest, state, _changes = prepare_manifest_state(
-        har_path,
+        AuthConfig(method=AUTH_METHOD_HAR, har_path=har_path),
         downloads,
         state_file,
         tmp_path / "manifest.json",

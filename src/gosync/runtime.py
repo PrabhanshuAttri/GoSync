@@ -3,8 +3,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from gosync.auth import AuthConfig, build_api_token_headers, resolve_auth_config
 from gosync.config import resolve_inside_data_dir
 from gosync.constants import (
+    AUTH_METHOD_API_TOKEN,
     DEFAULT_MANIFEST_FILE,
     DEFAULT_MEDIA_RESPONSES_FILE,
     STATUS_COMPLETE,
@@ -15,7 +17,6 @@ from gosync.downloader import (
     completed_count_for_items,
     extract_browser_headers,
     process_pipeline,
-    resolve_har_file,
 )
 from gosync.events import log_event, new_run_id
 from gosync.logging_config import LOGGER, configure_file_logging
@@ -23,6 +24,7 @@ from gosync.manifest import (
     MediaManifest,
     extension_counts,
     format_extension_summary,
+    read_manifest_from_api,
     read_manifest_from_har,
     write_manifest,
     write_media_responses_dump,
@@ -37,16 +39,18 @@ from gosync.state import (
     load_state,
     sync_state_with_downloads,
 )
+from gosync.telemetry import run_telemetry_job
 
 
 @dataclass(frozen=True)
 class RuntimePaths:
     data_dir: Path
-    har_path: Path
+    har_path: Path | None
     output_dir: Path
     state_file: Path
     manifest_file: Path
     media_dump_file: Path
+    auth: AuthConfig
 
 
 @dataclass(frozen=True)
@@ -57,45 +61,76 @@ class PreparedManifestState:
     sync_changes: list[dict[str, str]]
 
 
+def auth_source_label(auth: AuthConfig) -> str:
+    if auth.method == AUTH_METHOD_API_TOKEN:
+        return "API token"
+    return auth.har_path.name if auth.har_path else "HAR file"
+
+
+def resolve_headers(
+    auth: AuthConfig,
+    progress: ProgressState | None = None,
+    job_id: str | None = None,
+) -> dict[str, str]:
+    if auth.method == AUTH_METHOD_API_TOKEN:
+        return build_api_token_headers(auth.auth_token)
+    return extract_browser_headers(auth.har_path, progress, job_id)
+
+
 def get_runtime_paths(
     args: argparse.Namespace,
     har_file: str | None = None,
 ) -> RuntimePaths:
     data_dir = Path(args.data_dir).expanduser().resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
+    auth = resolve_auth_config(args, data_dir, har_file)
 
     return RuntimePaths(
         data_dir,
-        resolve_har_file(data_dir, har_file or args.har_file),
+        auth.har_path,
         resolve_inside_data_dir(data_dir, args.output_folder).resolve(),
         resolve_inside_data_dir(data_dir, args.state_file).resolve(),
         resolve_inside_data_dir(data_dir, DEFAULT_MANIFEST_FILE).resolve(),
         resolve_inside_data_dir(data_dir, DEFAULT_MEDIA_RESPONSES_FILE).resolve(),
+        auth,
     )
 
 
-def runtime_cache_key(paths: RuntimePaths) -> tuple[str, float, str, float, str, float]:
+def runtime_cache_key(
+    paths: RuntimePaths,
+) -> tuple[str, float, str, float, str, float, str]:
+    har_mtime = (
+        paths.har_path.stat().st_mtime
+        if paths.har_path and paths.har_path.exists()
+        else 0.0
+    )
     return (
-        str(paths.har_path),
-        paths.har_path.stat().st_mtime,
+        str(paths.har_path) if paths.har_path else "",
+        har_mtime,
         str(paths.state_file),
         paths.state_file.stat().st_mtime if paths.state_file.exists() else 0,
         str(paths.output_dir),
         paths.output_dir.stat().st_mtime if paths.output_dir.exists() else 0,
+        f"{paths.auth.method}:{paths.auth.auth_token or ''}:{paths.auth.user_id or ''}",
     )
 
 
 def prepare_manifest_state(
-    har_path: Path,
+    auth: AuthConfig,
     output_dir: Path,
     state_file: Path,
     manifest_file: Path,
     media_dump_file: Path,
     progress: ProgressState | None = None,
 ) -> tuple[MediaManifest, dict, list[dict[str, str]]]:
-    manifest = read_manifest_from_har(har_path)
-    write_manifest(manifest, manifest_file, har_path)
-    write_media_responses_dump(manifest, media_dump_file, har_path)
+    if auth.method == AUTH_METHOD_API_TOKEN:
+        headers = build_api_token_headers(auth.auth_token)
+        manifest = read_manifest_from_api(headers, auth.user_id)
+    else:
+        manifest = read_manifest_from_har(auth.har_path)
+    source_label = auth_source_label(auth)
+    write_manifest(manifest, manifest_file, source_label)
+    write_media_responses_dump(manifest, media_dump_file, source_label)
 
     create_or_update_state(state_file, manifest)
     state, sync_changes = sync_state_with_downloads(state_file, output_dir)
@@ -178,7 +213,7 @@ def prepare_paths_manifest_state(
     progress: ProgressState | None = None,
 ) -> PreparedManifestState:
     manifest, state, sync_changes = prepare_manifest_state(
-        paths.har_path,
+        paths.auth,
         paths.output_dir,
         paths.state_file,
         paths.manifest_file,
@@ -202,24 +237,25 @@ def run_once(args: argparse.Namespace) -> int:
     paths = prepared.paths
     log_file = configure_file_logging(paths.data_dir)
 
+    auth_label = auth_source_label(paths.auth)
     run_id = new_run_id()
     log_event(
         "app.starting",
         "GoSync run started",
         run_id=run_id,
         data_dir=str(paths.data_dir),
-        har_file=paths.har_path.name,
+        har_file=auth_label,
         destination=str(paths.output_dir),
         state_file=str(paths.state_file),
         batch_max_bytes=args.batch_max_bytes,
-        cli_message=f"GoSync run started with HAR file {paths.har_path.name}",
+        cli_message=f"GoSync run started with {auth_label}",
     )
     LOGGER.info("File logging enabled at %s", log_file)
     LOGGER.info(
-        "Starting run-once download. data_dir=%s har_file=%s output_dir=%s "
+        "Starting run-once download. data_dir=%s auth_source=%s output_dir=%s "
         "state_file=%s batch_max_bytes=%s",
         paths.data_dir,
-        paths.har_path,
+        auth_label,
         paths.output_dir,
         paths.state_file,
         args.batch_max_bytes,
@@ -238,16 +274,31 @@ def run_once(args: argparse.Namespace) -> int:
         },
         total_count=len(prepared.manifest.media),
     )
-    headers = extract_browser_headers(paths.har_path)
-    try:
-        run_sidecar_job(
-            paths.har_path,
-            paths.output_dir,
-            media_items=manifest.media,
-            state_file=paths.state_file,
-        )
-    except Exception:
-        LOGGER.exception("Sidecar generation failed; continuing download.")
+    headers = resolve_headers(paths.auth)
+    # Fetch all metadata/sidecar files (telemetry, then XMP) before the media
+    # itself, so they're available even if the media download is slow or
+    # interrupted -- and so XMP generation can pick up GPS from the
+    # just-fetched telemetry in the same run.
+    if getattr(args, "download_telemetry", False):
+        try:
+            run_telemetry_job(
+                headers,
+                manifest.media,
+                paths.output_dir,
+                state_file=paths.state_file,
+            )
+        except Exception:
+            LOGGER.exception("Telemetry download failed; continuing.")
+    if getattr(args, "create_xmp_sidecars", True):
+        try:
+            run_sidecar_job(
+                paths.har_path,
+                paths.output_dir,
+                media_items=manifest.media,
+                state_file=paths.state_file,
+            )
+        except Exception:
+            LOGGER.exception("Sidecar generation failed; continuing download.")
     process_pipeline(
         media_items=manifest.media,
         data_dir=paths.data_dir,
@@ -299,6 +350,7 @@ def run_download_job(
     try:
         active_job_id = active_job_id or new_run_id()
         paths = get_runtime_paths(args, har_file)
+        auth_label = auth_source_label(paths.auth)
         data_dir = paths.data_dir
         state_file = paths.state_file
         progress.update(
@@ -322,14 +374,18 @@ def run_download_job(
             current_download_elapsed_seconds=0,
             output_dir=str(paths.output_dir),
             sidecar_dir=str(paths.output_dir),
-            har_file=str(paths.har_path),
+            har_file=auth_label,
         )
         progress.emit_event(
             "har.scan.started",
-            "Scanning HAR file",
+            (
+                "Scanning HAR file"
+                if paths.auth.method != AUTH_METHOD_API_TOKEN
+                else "Fetching media list from GoPro API"
+            ),
             phase="auth",
             job_id_guard=active_job_id,
-            har_file=paths.har_path.name,
+            har_file=auth_label,
         )
         prepared = prepare_paths_manifest_state(paths)
         manifest = prepared.manifest
@@ -371,7 +427,50 @@ def run_download_job(
                 selected_count=len(media_items),
                 cli_message=f"Selected {len(media_items):,} media files for download.",
             )
-        headers = extract_browser_headers(paths.har_path, progress, active_job_id)
+        headers = resolve_headers(paths.auth, progress, active_job_id)
+        # Fetch metadata/telemetry files before the media itself, so they're
+        # available even if the media download is slow or interrupted.
+        if getattr(args, "download_telemetry", False):
+            progress.emit_event(
+                "telemetry.generation.started",
+                "Fetching mediainfo and telemetry sidecars",
+                phase="telemetry",
+                job_id_guard=active_job_id,
+                set_message=False,
+            )
+            written, failed = run_telemetry_job(
+                headers,
+                media_items,
+                paths.output_dir,
+                state_file=state_file,
+                progress=progress,
+                job_id=active_job_id,
+            )
+            progress.emit_event(
+                "telemetry.generation.completed",
+                f"Telemetry fetched for {written} item(s), {failed} failed.",
+                phase="telemetry",
+                job_id_guard=active_job_id,
+                set_message=False,
+                written_count=written,
+                failed_count=failed,
+            )
+        # XMP generation runs after telemetry (not as a concurrent thread) so
+        # it can reliably pick up the GPS data telemetry just fetched --
+        # a separate thread racing telemetry could read mediainfo.json
+        # before telemetry had written it.
+        if getattr(args, "create_xmp_sidecars", True):
+            try:
+                run_sidecar_job(
+                    paths.har_path,
+                    paths.output_dir,
+                    progress=progress,
+                    media_items=media_items,
+                    state_file=state_file,
+                    job_id=active_job_id,
+                )
+            except Exception:
+                LOGGER.exception("Sidecar generation failed; continuing download.")
         process_pipeline(
             media_items=media_items,
             data_dir=paths.data_dir,
@@ -502,4 +601,77 @@ def run_download_job(
             error_message=str(exc),
             state_label="Failed",
             cli_message=f"Download failed: {exc}",
+        )
+
+
+def run_metadata_update_job(
+    headers: dict[str, str],
+    media_items,
+    output_dir: Path,
+    har_path: Path | None,
+    state_file: Path,
+    progress: ProgressState | None = None,
+    job_id: str | None = None,
+) -> None:
+    """Manual "update all sidecars" action: force-refetch telemetry, then
+    regenerate XMP sidecars from it -- sequentially in one thread, not two
+    concurrent ones, so XMP generation reliably sees the GPS data telemetry
+    just fetched instead of racing it."""
+    try:
+        written, failed = run_telemetry_job(
+            headers,
+            media_items,
+            output_dir,
+            state_file=state_file,
+            progress=progress,
+            job_id=job_id,
+            force=True,
+        )
+        if progress:
+            progress.emit_event(
+                "telemetry.generation.completed",
+                f"Telemetry fetched for {written} item(s), {failed} failed.",
+                level="WARNING" if failed else "SUCCESS",
+                phase="telemetry",
+                job_id_guard=job_id,
+                set_message=False,
+                written_count=written,
+                failed_count=failed,
+            )
+        run_sidecar_job(
+            har_path,
+            output_dir,
+            progress=progress,
+            media_items=media_items,
+            state_file=state_file,
+            job_id=job_id,
+        )
+    except Exception as exc:
+        LOGGER.exception("Sidecar update job failed.")
+        if progress:
+            progress.update(
+                job_id_guard=job_id,
+                status="failed",
+                state_label="Failed",
+                finished_at=datetime.now().isoformat(timespec="seconds"),
+            )
+            progress.emit_event(
+                "error.unhandled",
+                "Unhandled sidecar update error",
+                level="ERROR",
+                phase="sidecars",
+                job_id_guard=job_id,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                state_label="Failed",
+                cli_message=f"Sidecar update failed: {exc}",
+            )
+        return
+
+    if progress:
+        progress.update(
+            job_id_guard=job_id,
+            status="complete",
+            state_label="Completed",
+            finished_at=datetime.now().isoformat(timespec="seconds"),
         )

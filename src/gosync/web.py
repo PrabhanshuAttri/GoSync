@@ -17,27 +17,35 @@ from werkzeug.utils import secure_filename
 
 from gosync import __version__
 from gosync.config import ACCESS_LOGS, IS_PROD
-from gosync.constants import STATUS_DOWNLOADED
+from gosync.constants import (
+    AUTH_METHOD_API_TOKEN,
+    AUTH_METHOD_HAR,
+    STATUS_COMPLETE,
+    STATUS_DOWNLOADED,
+)
 from gosync.events import current_run_status, recent_events
 from gosync.logging_config import LOGGER, configure_file_logging
 from gosync.progress import ProgressState
 from gosync.runtime import (
+    auth_source_label,
     format_manifest_state_summary,
     get_runtime_paths,
     prepare_paths_manifest_state,
     prepare_runtime_manifest_state,
+    resolve_headers,
     run_download_job,
+    run_metadata_update_job,
     runtime_cache_key,
 )
-from gosync.sidecar import run_sidecar_job
 from gosync.state import (
     completed_count as state_completed_count,
 )
-from gosync.state import load_state, pending_keys
+from gosync.state import downloaded_keys, load_state, pending_keys
 
 PROGRESS = ProgressState()
 JOB_THREAD: threading.Thread | None = None
 SIDECAR_THREAD: threading.Thread | None = None
+TELEMETRY_THREAD: threading.Thread | None = None
 JOB_LOCK = threading.Lock()
 RESUME_CACHE: dict[str, object] = {}
 MEDIA_ID_CACHE: dict[str, object] = {}
@@ -71,6 +79,26 @@ def create_app(args: argparse.Namespace) -> Flask:
     app = Flask(__name__)
     LOGGER.info("Starting GoSync web app. data_dir=%s", data_dir)
     current_har_name = args.har_file
+    current_auth_method = (
+        getattr(args, "auth_method", None) or AUTH_METHOD_HAR
+    ).strip().lower()
+    if current_auth_method not in (AUTH_METHOD_HAR, AUTH_METHOD_API_TOKEN):
+        current_auth_method = AUTH_METHOD_HAR
+    current_auth_token = (getattr(args, "auth_token", None) or "").strip()
+    current_user_id = (getattr(args, "user_id", None) or "").strip()
+    current_download_telemetry = bool(getattr(args, "download_telemetry", False))
+    current_create_xmp_sidecars = bool(getattr(args, "create_xmp_sidecars", True))
+
+    def effective_args() -> argparse.Namespace:
+        merged = vars(args).copy()
+        merged.update(
+            auth_method=current_auth_method,
+            auth_token=current_auth_token or None,
+            user_id=current_user_id or None,
+            download_telemetry=current_download_telemetry,
+            create_xmp_sidecars=current_create_xmp_sidecars,
+        )
+        return argparse.Namespace(**merged)
 
     def list_har_files() -> list[str]:
         return sorted(path.name for path in data_dir.glob("*.har"))
@@ -84,16 +112,25 @@ def create_app(args: argparse.Namespace) -> Flask:
             current_har = har_files[0]
         return current_har
 
+    def active_har_arg() -> str | None:
+        if current_auth_method == AUTH_METHOD_API_TOKEN:
+            return None
+        return selected_har_file() or None
+
+    def has_active_auth() -> bool:
+        if current_auth_method == AUTH_METHOD_API_TOKEN:
+            return bool(current_auth_token)
+        return bool(selected_har_file())
+
     def refresh_resume_counts(log_summary: bool = False) -> None:
         if PROGRESS.status == "running":
             return
 
-        current_har = selected_har_file()
-        if not current_har:
+        if not has_active_auth():
             return
 
         try:
-            paths = get_runtime_paths(args, current_har)
+            paths = get_runtime_paths(effective_args(), active_har_arg())
             cache_key = runtime_cache_key(paths)
             summary = None
 
@@ -131,31 +168,22 @@ def create_app(args: argparse.Namespace) -> Flask:
                 total_ids=total_ids,
                 completed_ids=completed_count,
                 pending_ids=max(total_ids - completed_count, 0),
-                har_file=str(paths.har_path),
+                har_file=auth_source_label(paths.auth),
             )
         except Exception as exc:
             LOGGER.warning("Failed to refresh resume counts: %s", exc)
             return
 
-    def state_cache_key(paths) -> tuple[str, float, str, float]:
-        return (
-            str(paths.har_path),
-            paths.har_path.stat().st_mtime,
-            str(paths.state_file),
-            paths.state_file.stat().st_mtime if paths.state_file.exists() else 0,
-        )
-
     def media_sidecar_rows() -> list[dict[str, str]]:
-        current_har = selected_har_file()
         state_records: list[dict[str, object]] = []
         cache_key = None
 
-        if current_har:
+        if has_active_auth():
             try:
-                paths = get_runtime_paths(args, current_har)
+                paths = get_runtime_paths(effective_args(), active_har_arg())
                 progress_snapshot = PROGRESS.snapshot()
                 cache_key = (
-                    state_cache_key(paths),
+                    runtime_cache_key(paths),
                     tuple(sorted(progress_snapshot.get("current_batch_keys", []))),
                     progress_snapshot.get("sidecar_status", ""),
                     progress_snapshot.get("sidecar_count", 0),
@@ -180,7 +208,6 @@ def create_app(args: argparse.Namespace) -> Flask:
             key=lambda item: str(item.get("filename", "")).lower(),
         ):
             filename = str(record.get("filename") or "")
-            sidecar_filename = str(record.get("sidecar_filename") or "")
             status = (
                 "downloading"
                 if str(record.get("key") or "") in current_batch_keys
@@ -192,7 +219,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                 {
                     "key": str(record.get("key") or ""),
                     "filename": filename,
-                    "sidecar_filename": sidecar_filename,
+                    "item_count": int(record.get("item_count") or 1),
                     "file_size": record.get("file_size"),
                     "captured_at": str(record.get("captured_at") or ""),
                     "status": status,
@@ -229,7 +256,49 @@ def create_app(args: argparse.Namespace) -> Flask:
             app_version=__version__,
             har_files=har_files,
             har_file=current_har or "No HAR file uploaded",
+            auth_method=current_auth_method,
+            auth_token_set=bool(current_auth_token),
+            user_id=current_user_id,
+            download_telemetry=current_download_telemetry,
+            create_xmp_sidecars=current_create_xmp_sidecars,
         )
+
+    def apply_settings_form(form) -> None:
+        nonlocal current_auth_method, current_auth_token, current_user_id
+        nonlocal current_download_telemetry, current_create_xmp_sidecars
+
+        token = (form.get("auth_token") or "").strip()
+        user_id = (form.get("user_id") or "").strip()
+        download_telemetry = form.get("download_telemetry") == "on"
+        create_xmp_sidecars = form.get("create_xmp_sidecars") == "on"
+
+        # Leave a previously-saved token in place if the (masked) field was
+        # submitted empty, so re-saving other settings doesn't force
+        # re-pasting the token every time.
+        effective_token = token or current_auth_token
+
+        current_auth_method = (
+            AUTH_METHOD_API_TOKEN if effective_token and user_id else AUTH_METHOD_HAR
+        )
+        if token:
+            current_auth_token = token
+        current_user_id = user_id
+        current_download_telemetry = download_telemetry
+        current_create_xmp_sidecars = create_xmp_sidecars
+        RESUME_CACHE.clear()
+        MEDIA_ID_CACHE.clear()
+
+    @app.post("/settings")
+    def update_settings():
+        apply_settings_form(request.form)
+        PROGRESS.emit_event(
+            "auth.settings.updated",
+            f"Auth method set to {current_auth_method}",
+            phase="selection",
+            auth_method=current_auth_method,
+            cli_message=f"Auth method set to {current_auth_method}",
+        )
+        return redirect(url_for("index"))
 
     @app.get("/favicon.ico")
     def favicon():
@@ -270,7 +339,7 @@ def create_app(args: argparse.Namespace) -> Flask:
             cli_message=f"Uploaded HAR file: {filename}",
         )
         try:
-            prepare_runtime_manifest_state(args, filename)
+            prepare_runtime_manifest_state(effective_args(), filename)
         except Exception as exc:
             LOGGER.warning(
                 "Failed to summarize uploaded HAR file %s: %s",
@@ -288,15 +357,24 @@ def create_app(args: argparse.Namespace) -> Flask:
             )
         return redirect(url_for("index"))
 
+    def any_job_running() -> bool:
+        return (
+            (JOB_THREAD is not None and JOB_THREAD.is_alive())
+            or (SIDECAR_THREAD is not None and SIDECAR_THREAD.is_alive())
+            or (TELEMETRY_THREAD is not None and TELEMETRY_THREAD.is_alive())
+        )
+
     @app.post("/start")
     def start():
-        global JOB_THREAD, SIDECAR_THREAD
+        global JOB_THREAD
 
-        selected_har = request.form.get("har_file") or current_har_name
+        apply_settings_form(request.form)
+        run_args = effective_args()
+        using_api_token = current_auth_method == AUTH_METHOD_API_TOKEN
+        form_har = request.form.get("har_file") or current_har_name
+        selected_har = None if using_api_token else form_har
         with JOB_LOCK:
-            if (JOB_THREAD and JOB_THREAD.is_alive()) or (
-                SIDECAR_THREAD and SIDECAR_THREAD.is_alive()
-            ):
+            if any_job_running():
                 PROGRESS.emit_event(
                     "error.validation",
                     "A job is already running",
@@ -306,7 +384,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                 )
                 return job_action_response()
 
-            if not selected_har:
+            if not using_api_token and not selected_har:
                 PROGRESS.emit_event(
                     "error.validation",
                     "No HAR file selected",
@@ -316,7 +394,20 @@ def create_app(args: argparse.Namespace) -> Flask:
                 )
                 return job_action_response()
 
-            prepared = prepare_runtime_manifest_state(args, selected_har)
+            try:
+                prepared = prepare_runtime_manifest_state(run_args, selected_har)
+            except Exception as exc:
+                LOGGER.warning("Could not load media for download: %s", exc)
+                PROGRESS.emit_event(
+                    "error.validation",
+                    "Could not load media for download",
+                    level="WARNING",
+                    phase="selection",
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
+                return job_action_response()
+
             valid_keys = {item.key for item in prepared.manifest.media}
             if request.form.get("selected_media_mode") == "all_pending":
                 selected_keys = pending_keys(prepared.state) & valid_keys
@@ -389,11 +480,17 @@ def create_app(args: argparse.Namespace) -> Flask:
                 current_download_speed_bps=0,
                 current_download_elapsed_seconds=0,
                 output_dir=str(paths.output_dir),
-                sidecar_status="pending",
+                sidecar_status=(
+                    "pending" if current_create_xmp_sidecars else STATUS_COMPLETE
+                ),
                 sidecar_count=0,
                 sidecar_dir=str(paths.output_dir),
-                sidecar_message="XMP sidecar generation queued.",
-                har_file=str(paths.har_path),
+                sidecar_message=(
+                    "XMP sidecar generation queued."
+                    if current_create_xmp_sidecars
+                    else "XMP sidecar generation disabled."
+                ),
+                har_file=auth_source_label(paths.auth),
             )
             PROGRESS.emit_event(
                 "download.plan.created",
@@ -404,13 +501,17 @@ def create_app(args: argparse.Namespace) -> Flask:
                 selected_count=len(selected_media),
                 pending_count=len(selected_keys),
                 already_downloaded_count=completed_count,
-                har_file=paths.har_path.name,
+                har_file=auth_source_label(paths.auth),
             )
 
+            # XMP + telemetry generation run inside run_download_job itself,
+            # sequenced before the media download (see runtime.py) -- not as
+            # a separate concurrent thread, so XMP generation can reliably
+            # see GPS data telemetry just fetched instead of racing it.
             JOB_THREAD = threading.Thread(
                 target=run_download_job,
                 args=(
-                    args,
+                    run_args,
                     PROGRESS,
                     selected_har,
                     selected_keys,
@@ -419,20 +520,102 @@ def create_app(args: argparse.Namespace) -> Flask:
                 ),
                 daemon=True,
             )
-            SIDECAR_THREAD = threading.Thread(
-                target=run_sidecar_job,
+            JOB_THREAD.start()
+
+        return job_action_response()
+
+    @app.post("/update-sidecars")
+    def update_sidecars():
+        global SIDECAR_THREAD, TELEMETRY_THREAD
+
+        with JOB_LOCK:
+            if any_job_running():
+                PROGRESS.emit_event(
+                    "error.validation",
+                    "A job is already running",
+                    level="WARNING",
+                    phase="selection",
+                    user_action="Wait for the current job to finish or stop it.",
+                )
+                return job_action_response()
+
+            if not has_active_auth():
+                PROGRESS.emit_event(
+                    "error.validation",
+                    "No HAR file or API token configured",
+                    level="WARNING",
+                    phase="selection",
+                    user_action=(
+                        "Configure a HAR file or API token before updating sidecars."
+                    ),
+                )
+                return job_action_response()
+
+            try:
+                prepared = prepare_runtime_manifest_state(
+                    effective_args(), active_har_arg()
+                )
+            except Exception as exc:
+                PROGRESS.emit_event(
+                    "error.validation",
+                    "Could not load media for sidecar update",
+                    level="WARNING",
+                    phase="selection",
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
+                return job_action_response()
+
+            paths = prepared.paths
+            downloaded = downloaded_keys(prepared.state)
+            media_items = [
+                item for item in prepared.manifest.media if item.key in downloaded
+            ]
+            if not media_items:
+                PROGRESS.emit_event(
+                    "error.validation",
+                    "No downloaded media to update sidecars for",
+                    level="WARNING",
+                    phase="selection",
+                    user_action="Download at least one file before updating sidecars.",
+                )
+                return job_action_response()
+
+            headers = resolve_headers(paths.auth)
+            job_id = uuid4().hex
+            MEDIA_ID_CACHE.clear()
+
+            PROGRESS.update(
+                job_id=job_id,
+                status="running",
+                state_label="Updating sidecars",
+                stop_requested=False,
+                finished_at="",
+            )
+            PROGRESS.emit_event(
+                "sidecar.update.started",
+                f"Updating XMP, GPX/GPMF, and mediainfo for {len(media_items)} file(s)",
+                level="ACTIVE",
+                phase="sidecars",
+                job_id_guard=job_id,
+                set_message=False,
+            )
+
+            SIDECAR_THREAD = None
+            TELEMETRY_THREAD = threading.Thread(
+                target=run_metadata_update_job,
                 args=(
-                    paths.har_path,
+                    headers,
+                    media_items,
                     paths.output_dir,
-                    PROGRESS,
-                    selected_media,
+                    paths.har_path,
                     paths.state_file,
+                    PROGRESS,
                     job_id,
                 ),
                 daemon=True,
             )
-            SIDECAR_THREAD.start()
-            JOB_THREAD.start()
+            TELEMETRY_THREAD.start()
 
         return job_action_response()
 
