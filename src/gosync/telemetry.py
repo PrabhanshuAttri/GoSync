@@ -93,11 +93,15 @@ def download_gpx_or_gpmf(
     download_data: dict[str, Any],
     output_dir: Path,
     stem: str,
-) -> tuple[float, float, float] | None:
+) -> tuple[tuple[float, float, float] | None, str | None]:
     """Fetch GPX telemetry (merging chapters into one track), falling back to
     raw per-chapter GPMF sidecars when no GPX is available for this item.
     Written to downloads/gpx/ or downloads/gpmf/, grouped by extension the
-    same way downloaded media is."""
+    same way downloaded media is.
+
+    Returns (geo, track_kind), where track_kind is "gpx", "gpmf", or None
+    when the item has no GPS telemetry sidecar at all -- callers use it to
+    report which track type was actually written for this item."""
     sidecar_files = download_data.get("_embedded", {}).get("sidecar_files", [])
 
     gpx_files = sorted(
@@ -108,21 +112,21 @@ def download_gpx_or_gpmf(
         gpx_contents = [_get(f["url"]).content for f in gpx_files]
         merged = merge_gpx(gpx_contents, stem)
         telemetry_output_path(output_dir, "gpx", stem).write_bytes(merged)
-        return first_gps_fix(gpx_contents)
+        return first_gps_fix(gpx_contents), "gpx"
 
     gpmf_files = sorted(
         (f for f in sidecar_files if f.get("label") == "gpmf"),
         key=lambda f: f.get("item_number", 1),
     )
     if not gpmf_files:
-        return None
+        return None, None
 
     for gpmf in gpmf_files:
         item_number = gpmf.get("item_number", 1)
         content = _get(gpmf["url"]).content
         out_path = telemetry_output_path(output_dir, "gpmf", f"{stem}_{item_number}")
         out_path.write_bytes(content)
-    return None
+    return None, "gpmf"
 
 
 def download_mediainfo(
@@ -170,7 +174,10 @@ def fetch_item_telemetry(
     headers: dict[str, str],
     item: MediaItem,
     output_dir: Path,
-) -> None:
+) -> str | None:
+    """Fetch this item's GPS track plus mediainfo.json. Returns the GPS track
+    kind written ("gpx"/"gpmf"), or None if the item had no GPS telemetry --
+    the mediainfo JSON is always written on success either way."""
     request_headers = json_api_headers(headers)
     download_data = _get(
         f"{MEDIA_DOWNLOAD_URL}/{item.media_id}/download",
@@ -178,10 +185,11 @@ def fetch_item_telemetry(
     ).json()
 
     stem = media_stem(item.filename)
-    geo = download_gpx_or_gpmf(download_data, output_dir, stem)
+    geo, track_kind = download_gpx_or_gpmf(download_data, output_dir, stem)
     download_mediainfo(
         request_headers, item.media_id, download_data, output_dir, stem, geo
     )
+    return track_kind
 
 
 def _pending_items(
@@ -221,21 +229,32 @@ def run_telemetry_job(
 
     for item in pending:
         try:
-            fetch_item_telemetry(headers, item, output_dir)
+            track_kind = fetch_item_telemetry(headers, item, output_dir)
         except Exception as exc:
             failed += 1
             LOGGER.warning("Telemetry fetch failed for %s: %s", item.filename, exc)
             if state_file:
                 mark_telemetry(state_file, [item.key], STATUS_FAILED, str(exc))
-        else:
-            written += 1
-            if state_file:
-                mark_telemetry(state_file, [item.key], STATUS_COMPLETE)
+            continue
+
+        written += 1
+        if state_file:
+            mark_telemetry(state_file, [item.key], STATUS_COMPLETE)
 
         if progress:
+            if track_kind:
+                progress.emit_event(
+                    "telemetry.track.completed",
+                    f"{track_kind.upper()} processed for {item.filename}",
+                    phase="telemetry",
+                    job_id_guard=job_id,
+                    set_message=False,
+                    file_name=item.filename,
+                    file_id=item.media_id,
+                )
             progress.emit_event(
-                "telemetry.item.completed",
-                f"Telemetry processed for {item.filename}",
+                "telemetry.mediainfo.completed",
+                f"JSON processed for {item.filename}",
                 phase="telemetry",
                 job_id_guard=job_id,
                 set_message=False,

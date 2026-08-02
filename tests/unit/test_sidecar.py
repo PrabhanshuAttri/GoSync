@@ -10,6 +10,7 @@ from gosync.sidecar import (
     gps_altitude,
     gps_dms,
     sidecar_stem,
+    technical_info_from_telemetry,
     write_sidecars_for_manifest,
     xml_escape,
 )
@@ -167,6 +168,154 @@ def test_write_sidecars_for_manifest_picks_up_existing_telemetry_geo(
 
     sidecar_path = sidecar_output_path(output_dir, item.filename, item.sidecar_filename)
     assert "exif:GPSLatitude" in sidecar_path.read_text(encoding="utf-8")
+
+
+def test_build_xmp_writes_dimensions_orientation_and_software_from_flat_metadata() -> (
+    None
+):
+    xmp = build_xmp(
+        {
+            "filename": "GX010001.MP4",
+            "width": 3840,
+            "height": 2160,
+            "orientation": 1,
+            "firmware_version": "H21.01.01.42.00",
+        }
+    )
+
+    assert "<tiff:ImageWidth>3840</tiff:ImageWidth>" in xmp
+    assert "<tiff:ImageLength>2160</tiff:ImageLength>" in xmp
+    assert "<tiff:Orientation>1</tiff:Orientation>" in xmp
+    assert "<tiff:Software>H21.01.01.42.00</tiff:Software>" in xmp
+
+
+def test_build_xmp_prefers_technical_info_over_flat_metadata() -> None:
+    xmp = build_xmp(
+        {"filename": "GX010001.MP4", "width": 3840, "height": 2160, "orientation": 1},
+        technical={"width": 5312, "height": 2988, "orientation": 3},
+    )
+
+    assert "<tiff:ImageWidth>5312</tiff:ImageWidth>" in xmp
+    assert "<tiff:ImageLength>2988</tiff:ImageLength>" in xmp
+    assert "<tiff:Orientation>3</tiff:Orientation>" in xmp
+
+
+def test_build_xmp_writes_duration_only_from_technical_info() -> None:
+    without_technical = build_xmp(
+        {"filename": "GX010001.MP4", "source_duration": "9908732"}
+    )
+    assert "xmpDM:duration" not in without_technical
+
+    with_technical = build_xmp(
+        {"filename": "GX010001.MP4"},
+        technical={"duration_seconds": 1537.536},
+    )
+    assert '<xmpDM:duration rdf:parseType="Resource">' in with_technical
+    assert "<xmpDM:value>1537.536</xmpDM:value>" in with_technical
+    assert "<xmpDM:scale>1/1</xmpDM:scale>" in with_technical
+
+
+def test_build_xmp_adds_searchable_tags_for_fov_stabilization_camera_and_type() -> (
+    None
+):
+    xmp = build_xmp(
+        {
+            "filename": "GX010001.MP4",
+            "location_name": "Yosemite",
+            "type": "TimeLapseVideo",
+        },
+        technical={"fov": "linear", "lens": "front", "eis_active": "HS EIS"},
+    )
+
+    assert "<rdf:li>FOV: linear</rdf:li>" in xmp
+    assert "<rdf:li>Stabilized: HS EIS</rdf:li>" in xmp
+    assert "<rdf:li>Camera: front</rdf:li>" in xmp
+    assert "<rdf:li>Location: Yosemite</rdf:li>" in xmp
+    assert "<rdf:li>Type: TimeLapseVideo</rdf:li>" in xmp
+
+
+def test_build_xmp_omits_default_camera_position() -> None:
+    xmp = build_xmp(
+        {"filename": "GX010001.MP4"},
+        technical={"lens": "default"},
+    )
+
+    assert "Camera:" not in xmp
+
+
+def test_technical_info_from_telemetry_reads_mediainfo_task_result(
+    tmp_path: Path,
+) -> None:
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+    (json_dir / "GX010001_mediainfo.json").write_text(
+        json.dumps(
+            {
+                "media": {},
+                "mediainfo": {
+                    "task_result": {
+                        "duration": 1537.536,
+                        "encoded_width": 5312,
+                        "encoded_height": 2988,
+                        "exif_orientation": 1,
+                        "software": "H22.01.02.32.00",
+                        "gopro": {
+                            "fov": "linear",
+                            "lens": "front",
+                            "eis": True,
+                            "eis_active": "HS EIS",
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    info = technical_info_from_telemetry(tmp_path, "GX010001.MP4")
+
+    assert info == {
+        "duration_seconds": 1537.536,
+        "width": 5312,
+        "height": 2988,
+        "orientation": 1,
+        "software": "H22.01.02.32.00",
+        "fov": "linear",
+        "lens": "front",
+        "eis_active": "HS EIS",
+    }
+
+
+def test_technical_info_from_telemetry_returns_empty_when_missing(
+    tmp_path: Path,
+) -> None:
+    assert technical_info_from_telemetry(tmp_path, "GX010001.MP4") == {}
+
+
+def test_write_sidecars_for_manifest_picks_up_existing_technical_info(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    output_dir = tmp_path / "downloads"
+    json_dir = output_dir / "json"
+    json_dir.mkdir(parents=True)
+    (json_dir / "GX010001_mediainfo.json").write_text(
+        json.dumps(
+            {
+                "media": {},
+                "mediainfo": {"task_result": {"duration": 12.5, "encoded_width": 100}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    item = make_media_item("A", "GX010001.MP4", 100)
+
+    write_sidecars_for_manifest([item], output_dir)
+
+    sidecar_path = sidecar_output_path(output_dir, item.filename, item.sidecar_filename)
+    xmp = sidecar_path.read_text(encoding="utf-8")
+    assert "xmpDM:duration" in xmp
+    assert "<tiff:ImageWidth>100</tiff:ImageWidth>" in xmp
 
 
 def test_generate_sidecars_from_har_returns_written_count_and_matching_entries(

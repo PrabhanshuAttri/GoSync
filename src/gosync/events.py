@@ -49,6 +49,11 @@ ALLOWED_EVENTS = {
     "sidecar.generation.started",
     "sidecar.generation.completed",
     "sidecar.generation.failed",
+    "sidecar.item.completed",
+    "telemetry.generation.started",
+    "telemetry.generation.completed",
+    "telemetry.track.completed",
+    "telemetry.mediainfo.completed",
     "run.stop_requested",
     "run.cleanup.started",
     "run.cleanup.completed",
@@ -64,6 +69,7 @@ GROUP_LABELS = {
     "scan": "Media Scan",
     "auth": "Auth",
     "download": "Download",
+    "telemetry": "Telemetry",
     "sidecars": "Sidecars",
     "finish": "Finish",
 }
@@ -78,9 +84,14 @@ EVENT_GROUPS = {
     "har.scan.started": "scan",
     "har.scan.completed": "scan",
     "auth.session.reused": "auth",
+    "telemetry.generation.started": "telemetry",
+    "telemetry.generation.completed": "telemetry",
+    "telemetry.track.completed": "telemetry",
+    "telemetry.mediainfo.completed": "telemetry",
     "sidecar.generation.started": "sidecars",
     "sidecar.generation.completed": "sidecars",
     "sidecar.generation.failed": "sidecars",
+    "sidecar.item.completed": "sidecars",
     "run.cleanup.completed": "finish",
     "run.stopped": "finish",
 }
@@ -90,6 +101,7 @@ PHASE_GROUPS = {
     "download": "download",
     "scan": "scan",
     "selection": "scan",
+    "telemetry": "telemetry",
     "sidecars": "sidecars",
 }
 LEVELS = {

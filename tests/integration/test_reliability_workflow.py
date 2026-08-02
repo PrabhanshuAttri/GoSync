@@ -69,7 +69,7 @@ def test_resume_sync_detects_files_added_and_removed_after_prepare(
 
     jpg_path = media_download_path(downloads, "GX010002.JPG")
     jpg_path.parent.mkdir(parents=True)
-    jpg_path.write_text("done", encoding="utf-8")
+    jpg_path.write_text("x" * 50, encoding="utf-8")
     state, changes = sync_state_with_downloads(state_file, downloads)
 
     assert {

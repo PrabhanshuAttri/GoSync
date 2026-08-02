@@ -82,12 +82,13 @@ def test_download_gpx_or_gpmf_prefers_gpx_and_merges_chapters(
         }
     }
 
-    geo = download_gpx_or_gpmf(download_data, tmp_path, "clip")
+    geo, track_kind = download_gpx_or_gpmf(download_data, tmp_path, "clip")
 
     gpx_path = tmp_path / "gpx" / "clip.gpx"
     assert gpx_path.exists()
     assert gpx_path.read_bytes().count(b"<trkpt") == 2
     assert geo == (1.1, 2.1, 11.0)
+    assert track_kind == "gpx"
     assert not (tmp_path / "gpmf" / "clip_1.gpmf").exists()
 
 
@@ -108,18 +109,20 @@ def test_download_gpx_or_gpmf_falls_back_to_gpmf_when_no_gpx(
         }
     }
 
-    geo = download_gpx_or_gpmf(download_data, tmp_path, "clip")
+    geo, track_kind = download_gpx_or_gpmf(download_data, tmp_path, "clip")
 
     assert geo is None
+    assert track_kind == "gpmf"
     assert (tmp_path / "gpmf" / "clip_1.gpmf").read_bytes() == b"raw-gpmf-bytes"
     assert (tmp_path / "gpmf" / "clip_2.gpmf").read_bytes() == b"raw-gpmf-bytes"
 
 
 def test_download_gpx_or_gpmf_returns_none_when_no_sidecars(tmp_path: Path) -> None:
-    result = download_gpx_or_gpmf(
+    geo, track_kind = download_gpx_or_gpmf(
         {"_embedded": {"sidecar_files": []}}, tmp_path, "clip"
     )
-    assert result is None
+    assert geo is None
+    assert track_kind is None
 
 
 def test_download_mediainfo_strips_sensitive_fields_and_redacts_folder_path(
