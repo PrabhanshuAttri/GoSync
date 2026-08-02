@@ -204,9 +204,14 @@
         <section class="panel sidecar-table-panel">
           <div class="panel-header">
             <h2>Media Files</h2>
-            <select id="extension-filter" class="table-filter" aria-label="Filter media files by extension">
-              <option value="">All extensions</option>
-            </select>
+            <div class="panel-filters">
+              <select id="extension-filter" class="table-filter" aria-label="Filter media files by extension">
+                <option value="">All extensions</option>
+              </select>
+              <select id="status-filter" class="table-filter" aria-label="Filter media files by status">
+                <option value="">All statuses</option>
+              </select>
+            </div>
           </div>
           <div class="table-wrap">
             <table class="sidecar-table">
@@ -224,6 +229,12 @@
                     </button>
                   </th>
                   <th>
+                    <button class="sort-button" type="button" data-sort-key="captured_at" aria-label="Sort by date captured">
+                      <span>Captured</span>
+                      <span class="sort-indicator" id="captured-at-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
                     <button class="sort-button active" type="button" data-sort-key="status" aria-label="Sort by status">
                       <span>Status</span>
                       <span class="sort-indicator asc" id="status-sort-indicator" aria-hidden="true"></span>
@@ -233,7 +244,7 @@
               </thead>
               <tbody id="sidecar-table-body">
                 <tr>
-                  <td colspan="5" class="empty-cell">No media found.</td>
+                  <td colspan="6" class="empty-cell">No media found.</td>
                 </tr>
               </tbody>
             </table>
@@ -324,7 +335,7 @@
         value /= 1024;
         index += 1;
       }
-      return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
+      return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
     };
     const formatElapsed = (seconds) => {
       const total = Math.max(0, Math.floor(seconds || 0));

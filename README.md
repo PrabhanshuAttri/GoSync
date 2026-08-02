@@ -59,7 +59,7 @@ Plain Docker also works:
 docker run --rm \
   -p 8080:8080 \
   -v "$PWD/data:/data" \
-  ghcr.io/prabhanshuattri/gosync:1.3.0
+  ghcr.io/prabhanshuattri/gosync:latest
 ```
 
 Then open `http://localhost:8080`.

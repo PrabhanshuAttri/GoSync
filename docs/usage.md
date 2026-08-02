@@ -121,5 +121,5 @@ docker run --rm \
   -e DOWNLOAD_FOLDER=media \
   -e BATCH_MAX_BYTES=2147483648 \
   -v "$PWD/data:/data" \
-  ghcr.io/prabhanshuattri/gosync:1.3.0
+  ghcr.io/prabhanshuattri/gosync:latest
 ```
