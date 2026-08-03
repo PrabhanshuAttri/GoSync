@@ -15,6 +15,7 @@ from gosync.state import (
     mark_sidecars,
     media_file_exists,
     pending_keys,
+    refresh_file_sizes,
     save_state,
     sync_state_with_downloads,
 )
@@ -158,6 +159,79 @@ def test_sync_state_with_downloads_reverts_size_mismatched_downloaded_file(
     ]
     assert state["media"][item.key]["download_status"] == STATUS_PENDING
     assert "size mismatch" in state["media"][item.key]["last_error"].lower()
+
+
+def test_sync_state_with_downloads_tolerates_small_size_growth_over_expected(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    # A merged chapter recording never lands at exactly the API's per-chapter
+    # size sum (container remux overhead); growth up to SIZE_MATCH_TOLERANCE
+    # must still count as downloaded rather than reverting to pending.
+    item = make_media_item("A", "GX010002.MP4", 1000)
+    state_file = tmp_path / "state.json"
+    downloads = tmp_path / "downloads"
+    create_or_update_state(state_file, manifest_for_state([item]))
+
+    media_download_path(downloads, item.filename).parent.mkdir(parents=True)
+    media_download_path(downloads, item.filename).write_bytes(b"x" * 1005)
+    state, changes = sync_state_with_downloads(state_file, downloads)
+
+    assert changes == [{"id": "A", "filename": item.filename, "status": "found"}]
+    assert state["media"][item.key]["download_status"] == STATUS_DOWNLOADED
+
+
+def test_sync_state_with_downloads_rejects_size_growth_beyond_tolerance(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    item = make_media_item("A", "GX010002.MP4", 1000)
+    state_file = tmp_path / "state.json"
+    downloads = tmp_path / "downloads"
+    create_or_update_state(state_file, manifest_for_state([item]))
+
+    media_download_path(downloads, item.filename).parent.mkdir(parents=True)
+    media_download_path(downloads, item.filename).write_bytes(b"x" * 1020)
+    state, changes = sync_state_with_downloads(state_file, downloads)
+
+    assert changes == []
+    assert state["media"][item.key]["download_status"] == STATUS_PENDING
+
+
+def test_refresh_file_sizes_persists_actual_on_disk_size(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    # Simulates a chapter merge: the API-reported file_size is the sum of
+    # the raw chapters, but the merged output ffmpeg actually writes is a
+    # different size. refresh_file_sizes must overwrite the stale API value
+    # with reality so later resume-scans compare against the real file.
+    item = make_media_item("A", "GX010015.MP4", 1000)
+    state_file = tmp_path / "state.json"
+    downloads = tmp_path / "downloads"
+    create_or_update_state(state_file, manifest_for_state([item]))
+
+    media_download_path(downloads, item.filename).parent.mkdir(parents=True)
+    media_download_path(downloads, item.filename).write_bytes(b"x" * 998)
+
+    state = refresh_file_sizes(state_file, downloads, [item.key])
+
+    assert state["media"][item.key]["file_size"] == 998
+    assert load_state(state_file)["media"][item.key]["file_size"] == 998
+
+
+def test_refresh_file_sizes_ignores_keys_with_no_file_on_disk(
+    tmp_path: Path,
+    make_media_item,
+) -> None:
+    item = make_media_item("A", "GX010015.MP4", 1000)
+    state_file = tmp_path / "state.json"
+    downloads = tmp_path / "downloads"
+    create_or_update_state(state_file, manifest_for_state([item]))
+
+    state = refresh_file_sizes(state_file, downloads, [item.key])
+
+    assert state["media"][item.key]["file_size"] == 1000
 
 
 def test_media_file_exists_rejects_parent_directory_traversal(

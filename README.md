@@ -83,12 +83,11 @@ make sure the Network export includes request headers such as `Cookie` or
 
 ## Documentation
 
-- [Project overview](docs/project-overview.md): architecture, runtime
-  components, and data flow.
-- [Usage guide](docs/usage.md): web UI workflow, resume behavior, data directory
-  layout, and environment configuration.
-- [Download items](docs/download-items.md): HAR-derived media records, download
-  state, extraction, chapter files, and sidecar relationships.
+- [Project overview](docs/project-overview.md): architecture, authentication
+  methods, runtime components, data flow, web UI workflow, resume behavior,
+  data directory layout, and environment configuration.
+- [Media items](docs/media-items.md): HAR-derived media records, download
+  state, extraction, chapter file merging, and sidecar relationships.
 - [XMP sidecar processing](docs/sidecars.md): sidecar field selection and
   sensitive field exclusions.
 - [Development guide](docs/development.md): local builds, direct Python runs,

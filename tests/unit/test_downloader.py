@@ -59,6 +59,14 @@ class _FakeStreamResponse:
         yield from self.chunks
 
 
+def _which_ffmpeg_only(binary: str) -> str | None:
+    return "/usr/bin/ffmpeg" if binary == "ffmpeg" else None
+
+
+def _which_ffmpeg_and_exiftool(binary: str) -> str | None:
+    return f"/usr/bin/{binary}" if binary in ("ffmpeg", "exiftool") else None
+
+
 class _FakeSession:
     def __init__(self, response=None, get_error=None):
         self._response = response
@@ -233,7 +241,7 @@ def test_merge_chapter_files_success_orders_chapters_in_concat_list(
         Path(cmd[-1]).write_text("chapter-1chapter-2chapter-3", encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(shutil, "which", lambda _binary: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_only)
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     progress = ProgressState(job_id="job-1")
@@ -259,6 +267,128 @@ def test_merge_chapter_files_success_orders_chapters_in_concat_list(
     ]
     for flag in ("-map", "-map_metadata", "-movflags", "use_metadata_tags"):
         assert flag in captured["cmd"]
+
+
+def test_merge_chapter_files_copies_metadata_from_first_chapter(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=2)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for name, content in (
+        ("GX010320.MP4", "chapter-1"),
+        ("GX020320.MP4", "chapter-2"),
+    ):
+        (output_dir / name).write_text(content, encoding="utf-8")
+    target_path = media_download_path(output_dir, item.filename)
+    exiftool_calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[0] == "/usr/bin/exiftool":
+            exiftool_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        Path(cmd[-1]).write_text("chapter-1chapter-2", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_and_exiftool)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    progress = ProgressState(job_id="job-1")
+
+    assert merge_chapter_files(output_dir, item, target_path, progress, "job-1") is True
+
+    assert len(exiftool_calls) == 1
+    cmd = exiftool_calls[0]
+    assert "-TagsFromFile" in cmd
+    # Metadata source must be chapter 1 at its pre-merge path (still present
+    # at merge time, before originals get moved aside).
+    source_arg = cmd[cmd.index("-TagsFromFile") + 1]
+    assert source_arg == str((output_dir / "GX010320.MP4").resolve())
+    assert "-all:all" in cmd
+    assert "--Duration" in cmd
+    assert cmd[-1] == str(target_path)
+    events = progress.snapshot()["events"]
+    assert any(
+        event["event"] == "download.chapter.metadata_copied" for event in events
+    )
+
+
+def test_merge_chapter_files_missing_exiftool_still_succeeds_with_warning(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=2)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for name, content in (
+        ("GX010320.MP4", "chapter-1"),
+        ("GX020320.MP4", "chapter-2"),
+    ):
+        (output_dir / name).write_text(content, encoding="utf-8")
+    target_path = media_download_path(output_dir, item.filename)
+
+    def fake_run(cmd, **_kwargs):
+        Path(cmd[-1]).write_text("chapter-1chapter-2", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_only)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    progress = ProgressState(job_id="job-1")
+
+    result = merge_chapter_files(output_dir, item, target_path, progress, "job-1")
+
+    assert result is True
+    assert target_path.read_text(encoding="utf-8") == "chapter-1chapter-2"
+    events = progress.snapshot()["events"]
+    skipped_events = [
+        event
+        for event in events
+        if event["event"] == "download.chapter.metadata_skipped"
+    ]
+    assert len(skipped_events) == 1
+    assert skipped_events[0]["level"] == "warning"
+
+
+def test_merge_chapter_files_exiftool_failure_still_succeeds_with_warning(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=2)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for name, content in (
+        ("GX010320.MP4", "chapter-1"),
+        ("GX020320.MP4", "chapter-2"),
+    ):
+        (output_dir / name).write_text(content, encoding="utf-8")
+    target_path = media_download_path(output_dir, item.filename)
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[0] == "/usr/bin/exiftool":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="bad atom")
+        Path(cmd[-1]).write_text("chapter-1chapter-2", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_and_exiftool)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    progress = ProgressState(job_id="job-1")
+
+    result = merge_chapter_files(output_dir, item, target_path, progress, "job-1")
+
+    assert result is True
+    assert target_path.read_text(encoding="utf-8") == "chapter-1chapter-2"
+    events = progress.snapshot()["events"]
+    failed_events = [
+        event
+        for event in events
+        if event["event"] == "download.chapter.metadata_failed"
+    ]
+    assert len(failed_events) == 1
+    assert failed_events[0]["level"] == "warning"
+    assert "bad atom" in failed_events[0]["error_details"]
 
 
 def test_merge_chapter_files_missing_ffmpeg_falls_back(
@@ -306,7 +436,7 @@ def test_merge_chapter_files_subprocess_failure_preserves_sources(
             cmd, 1, stdout="", stderr="boom\nsecond line"
         )
 
-    monkeypatch.setattr(shutil, "which", lambda _binary: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_only)
     monkeypatch.setattr(subprocess, "run", fake_run)
     progress = ProgressState(job_id="job-1")
 
@@ -361,7 +491,7 @@ def test_organize_extracted_media_merges_chapter_files_end_to_end(
         Path(cmd[-1]).write_text("chapter-1chapter-2chapter-3", encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(shutil, "which", lambda _binary: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_only)
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     completed_keys = organize_extracted_media(output_dir, [item])
@@ -458,6 +588,11 @@ def test_process_pipeline_merges_chapter_batch_and_marks_downloaded(
     assert merged_path.read_text(encoding="utf-8") == "chapter-1chapter-2chapter-3"
     assert not (output_dir / "GX020320.MP4").exists()
     assert not (output_dir / "GX030320.MP4").exists()
+    # The merged file (27 bytes) never matches item.file_size (30, the API's
+    # per-chapter sum) exactly -- process_pipeline must persist the real
+    # on-disk size so later resume-scans compare against reality.
+    assert state["media"][item.key]["file_size"] == merged_path.stat().st_size
+    assert state["media"][item.key]["file_size"] != item.file_size
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")

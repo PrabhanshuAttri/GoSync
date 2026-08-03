@@ -36,7 +36,7 @@ When you want a stable release, update every release-facing version reference:
 - `setup.py`
 - any release notes or docs that mention the current version
 
-`README.md` and `docs/usage.md` use the `latest` image tag and do not need a version bump.
+`README.md` and `docs/project-overview.md` use the `latest` image tag and do not need a version bump.
 
 The GHCR publishing workflow reads the package version from `src/gosync/__init__.py` and
 passes it into the image build as `GOSYNC_VERSION`.

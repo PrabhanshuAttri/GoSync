@@ -14,7 +14,13 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import ChunkedEncodingError, ConnectionError, ReadTimeout
 from urllib3.util.retry import Retry
 
-from gosync.config import FFMPEG_BINARY, FFMPEG_TIMEOUT_SECONDS, REQUEST_TIMEOUT
+from gosync.config import (
+    EXIFTOOL_BINARY,
+    EXIFTOOL_TIMEOUT_SECONDS,
+    FFMPEG_BINARY,
+    FFMPEG_TIMEOUT_SECONDS,
+    REQUEST_TIMEOUT,
+)
 from gosync.constants import (
     DEFAULT_HAR_FILE,
     DEFAULT_HEADERS,
@@ -29,7 +35,7 @@ from gosync.events import ProgressEventThrottle, log_event
 from gosync.manifest import MediaItem
 from gosync.paths import media_download_path, safe_child_path
 from gosync.progress import ProgressState
-from gosync.state import mark_downloaded, mark_failed, pending_keys
+from gosync.state import mark_downloaded, mark_failed, pending_keys, refresh_file_sizes
 
 try:
     from tqdm import tqdm
@@ -413,6 +419,84 @@ def find_chapter_source_files(output_dir: Path, item: MediaItem) -> list[Path] |
     return [path for _, path in candidates]
 
 
+# exiftool tags that describe the *file itself* rather than the recording --
+# these are computed from the merged file's own real structure (duration,
+# in particular, legitimately grows to the true combined length) and must
+# never be overwritten with chapter 1's values. FileSize/MediaDataSize/
+# TrackDuration/MediaDuration/TimeScale are already exiftool-protected
+# (not writable at all), so only Duration needs an explicit exclusion.
+EXIFTOOL_METADATA_EXCLUDE_TAGS = ("Duration",)
+
+
+def copy_merged_metadata(
+    target_path: Path,
+    source_chapter: Path,
+    item: MediaItem,
+    progress: ProgressState | None = None,
+    job_id: str | None = None,
+) -> None:
+    """Copy camera/lens/firmware/settings metadata from a source chapter onto
+    the merged output. ffmpeg's stream copy does not preserve GoPro's
+    proprietary metadata (see docs/media-items.md) -- only exiftool
+    understands that atom well enough to carry it forward."""
+    exiftool_binary = shutil.which(EXIFTOOL_BINARY)
+    if not exiftool_binary:
+        emit_progress_event(
+            progress,
+            "download.chapter.metadata_skipped",
+            f"exiftool not found; {item.filename} merged without camera/lens "
+            "metadata",
+            level="WARNING",
+            job_id=job_id,
+            **media_event_payload(item),
+        )
+        return
+
+    try:
+        result = subprocess.run(
+            [
+                exiftool_binary,
+                "-TagsFromFile",
+                str(source_chapter),
+                "-all:all",
+                *(f"--{tag}" for tag in EXIFTOOL_METADATA_EXCLUDE_TAGS),
+                "-overwrite_original",
+                "-P",
+                str(target_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=EXIFTOOL_TIMEOUT_SECONDS,
+        )
+        copy_ok = result.returncode == 0
+        stderr_text = result.stderr or ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        copy_ok = False
+        stderr_text = str(exc)
+
+    if not copy_ok:
+        stderr_tail = "\n".join(stderr_text.strip().splitlines()[-20:])
+        emit_progress_event(
+            progress,
+            "download.chapter.metadata_failed",
+            f"Failed to copy camera/lens metadata onto merged {item.filename}",
+            level="WARNING",
+            job_id=job_id,
+            error_details=stderr_tail,
+            **media_event_payload(item),
+        )
+        return
+
+    emit_progress_event(
+        progress,
+        "download.chapter.metadata_copied",
+        f"Copied camera/lens metadata from {source_chapter.name} onto "
+        f"{item.filename}",
+        job_id=job_id,
+        **media_event_payload(item),
+    )
+
+
 def merge_chapter_files(
     output_dir: Path,
     item: MediaItem,
@@ -516,6 +600,8 @@ def merge_chapter_files(
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
         merged_tmp_path.replace(target_path)
+
+    copy_merged_metadata(target_path, chapter_paths[0], item, progress, job_id)
 
     extension = target_path.suffix.lstrip(".").lower() or "unknown"
     originals_dir = output_dir / f"{ORIGINAL_UNMERGED_FOLDER_PREFIX}_{extension}"
@@ -976,6 +1062,7 @@ def process_pipeline(
 
             temp_zip.unlink(missing_ok=True)
             state = mark_downloaded(state_file, batch_keys)
+            state = refresh_file_sizes(state_file, output_dir, batch_keys)
             completed_count = completed_count_for_items(
                 state,
                 filtered_progress_items,

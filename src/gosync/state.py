@@ -4,7 +4,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from gosync.constants import STATUS_DOWNLOADED, STATUS_FAILED, STATUS_PENDING
+from gosync.constants import (
+    SIZE_MATCH_TOLERANCE,
+    STATUS_DOWNLOADED,
+    STATUS_FAILED,
+    STATUS_PENDING,
+)
 from gosync.manifest import MediaManifest
 from gosync.paths import media_download_path, safe_child_path
 
@@ -124,7 +129,17 @@ def _size_matches(actual_size: int, expected_size: int | None) -> bool:
     # expected_size is only known when the API reported a file_size for this
     # media item; without it we can't detect a mismatch, so fall back to
     # existence alone.
-    return expected_size is None or actual_size == expected_size
+    if expected_size is None:
+        return True
+    # A merged chapter recording's on-disk size is refreshed to the real
+    # post-merge size right after downloading (see refresh_file_sizes), so
+    # from that point on any shrinkage means truncation/corruption -- never
+    # tolerate less than expected. Growth is tolerated up to a small margin:
+    # re-running exiftool/ffmpeg against the same sources is not guaranteed
+    # to be perfectly byte-deterministic across tool versions.
+    if actual_size < expected_size:
+        return False
+    return actual_size <= expected_size * (1 + SIZE_MATCH_TOLERANCE)
 
 
 def _locate_media_file_size(
@@ -317,6 +332,40 @@ def mark_downloaded(state_file: Path, keys: list[str]) -> dict[str, Any]:
             record["download_status"] = STATUS_DOWNLOADED
             record["last_error"] = ""
     save_state(state_file, state)
+    return state
+
+
+def refresh_file_sizes(
+    state_file: Path, output_dir: Path, keys: list[str]
+) -> dict[str, Any]:
+    """Re-stat just-downloaded files and record their true on-disk size.
+
+    Chapter-merged recordings are rewritten by ffmpeg/exiftool and rarely
+    land at exactly the API's per-chapter file_size sum (container remux
+    overhead differs per file -- see docs/media-items.md). Persisting
+    the real size here is what lets later resume-scans compare against
+    reality instead of a stale API total that a completed merge can never
+    match.
+    """
+    state = load_state(state_file)
+    media = state.get("media", {})
+    if not isinstance(media, dict):
+        return state
+    existing_filenames = downloaded_filename_index(output_dir)
+    changed = False
+    for key in keys:
+        record = media.get(key)
+        if not isinstance(record, dict):
+            continue
+        filename = str(record.get("filename") or "")
+        if not filename:
+            continue
+        actual_size = _locate_media_file_size(output_dir, filename, existing_filenames)
+        if actual_size is not None and actual_size != record.get("file_size"):
+            record["file_size"] = actual_size
+            changed = True
+    if changed:
+        save_state(state_file, state)
     return state
 
 

@@ -9,6 +9,14 @@ DEFAULT_TEMP_ZIP = "gopro_temp_batch.zip"
 REPORTS_FOLDER = "reports"
 DEFAULT_FFMPEG_BINARY = "ffmpeg"
 DEFAULT_FFMPEG_TIMEOUT_SECONDS = 900
+DEFAULT_EXIFTOOL_BINARY = "exiftool"
+DEFAULT_EXIFTOOL_TIMEOUT_SECONDS = 300
+# Merged chapter files are rewritten by ffmpeg/exiftool and never land at
+# exactly the API's per-chapter file_size sum (container remux overhead
+# differs per file); allow the on-disk size to exceed the recorded size by
+# this fraction without being treated as a mismatch. It must never be
+# *smaller* than the recorded size -- that still means a truncated file.
+SIZE_MATCH_TOLERANCE = 0.01
 
 MEDIA_SEARCH_URL = "https://api.gopro.com/media/search"
 ZIP_URL_PREFIX = "https://api.gopro.com/media/x/zip/source"
