@@ -40,6 +40,7 @@ setup(
     entry_points={
         "console_scripts": [
             "gosync=gosync.__main__:main",
+            "gosync-verify-chapters=gosync.verify:main",
         ],
     },
     include_package_data=True,

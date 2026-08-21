@@ -16,11 +16,14 @@ from gosync.downloader import (
     DownloadCancelled,
     completed_count_for_items,
     extract_browser_headers,
+    media_event_payload,
+    merge_chapter_files,
     process_pipeline,
 )
 from gosync.events import log_event, new_run_id
 from gosync.logging_config import LOGGER, configure_file_logging
 from gosync.manifest import (
+    MediaItem,
     MediaManifest,
     extension_counts,
     format_extension_summary,
@@ -29,6 +32,7 @@ from gosync.manifest import (
     write_manifest,
     write_media_responses_dump,
 )
+from gosync.paths import media_download_path, safe_child_path
 from gosync.progress import ProgressState
 from gosync.report import build_run_summary, build_run_summary_event, write_run_report
 from gosync.sidecar import run_sidecar_job
@@ -37,6 +41,8 @@ from gosync.state import (
     downloaded_extension_counts,
     format_downloaded_extension_summary,
     load_state,
+    mark_downloaded,
+    refresh_file_sizes,
     sync_state_with_downloads,
 )
 from gosync.telemetry import run_telemetry_job
@@ -665,6 +671,81 @@ def run_metadata_update_job(
                 error_message=str(exc),
                 state_label="Failed",
                 cli_message=f"Sidecar update failed: {exc}",
+            )
+        return
+
+    if progress:
+        progress.update(
+            job_id_guard=job_id,
+            status="complete",
+            state_label="Completed",
+            finished_at=datetime.now().isoformat(timespec="seconds"),
+        )
+
+
+def run_remerge_job(
+    media_items: list[MediaItem],
+    output_dir: Path,
+    state_file: Path,
+    progress: ProgressState | None = None,
+    job_id: str | None = None,
+) -> None:
+    """User-triggered "Re-run merge" dashboard action: unconditionally
+    re-merges the given chaptered items from their local chapter files,
+    bypassing the local-reuse "already exists, trust it" shortcut in
+    process_pipeline -- the user explicitly asked to redo it (e.g. to pick
+    up a fixed exiftool binary and refresh metadata). On failure for a
+    given item, per the "no quarantine" decision, its local chapter files
+    are left untouched and its download_status simply stays whatever it
+    already was -- the normal local-merge short-circuit will retry it from
+    the same files on the next regular download trigger."""
+    try:
+        remerged_keys: list[str] = []
+        for item in media_items:
+            target_path = media_download_path(output_dir, item.filename)
+            if not safe_child_path(output_dir, target_path):
+                continue
+            if progress:
+                progress.emit_event(
+                    "download.chapter.remerge_started",
+                    f"Re-merging {item.filename}",
+                    level="ACTIVE",
+                    state_label="Re-merging",
+                    job_id_guard=job_id,
+                    **media_event_payload(item),
+                )
+            if merge_chapter_files(output_dir, item, target_path, progress, job_id):
+                remerged_keys.append(item.key)
+                if progress:
+                    progress.emit_event(
+                        "download.chapter.remerged",
+                        f"Re-merged {item.filename}",
+                        level="SUCCESS",
+                        job_id_guard=job_id,
+                        **media_event_payload(item),
+                    )
+        if remerged_keys:
+            mark_downloaded(state_file, remerged_keys)
+            refresh_file_sizes(state_file, output_dir, remerged_keys)
+    except Exception as exc:
+        LOGGER.exception("Re-merge job failed.")
+        if progress:
+            progress.update(
+                job_id_guard=job_id,
+                status="failed",
+                state_label="Failed",
+                finished_at=datetime.now().isoformat(timespec="seconds"),
+            )
+            progress.emit_event(
+                "error.unhandled",
+                "Unhandled re-merge error",
+                level="ERROR",
+                phase="download",
+                job_id_guard=job_id,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                state_label="Failed",
+                cli_message=f"Re-merge failed: {exc}",
             )
         return
 

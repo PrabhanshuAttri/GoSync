@@ -109,6 +109,11 @@
               Update All Sidecars
             </button>
           </form>
+          <form id="rerun-merge-form" action="/rerun-merge" method="post" class="stop-form">
+            <button id="rerun-merge-button" class="secondary" type="submit" disabled>
+              Re-run Merge (<span id="rerun-merge-count">0</span> selected)
+            </button>
+          </form>
         </section>
       </aside>
 
@@ -253,11 +258,15 @@
                       <span class="sort-indicator asc" id="status-sort-indicator" aria-hidden="true"></span>
                     </button>
                   </th>
+                  <th>Merge</th>
+                  <th class="select-column">
+                    <input id="select-remerge-visible" type="checkbox" aria-label="Select all eligible chapters for re-merge">
+                  </th>
                 </tr>
               </thead>
               <tbody id="sidecar-table-body">
                 <tr>
-                  <td colspan="6" class="empty-cell">No media found.</td>
+                  <td colspan="8" class="empty-cell">No media found.</td>
                 </tr>
               </tbody>
             </table>
@@ -672,6 +681,9 @@
       document.getElementById("stop-button").disabled = !isRunning || data.stop_requested;
       document.getElementById("start-button").disabled = isRunning;
       document.getElementById("update-sidecars-button").disabled = isRunning;
+      document.getElementById("rerun-merge-button").disabled = (
+        isRunning || !window.gosyncMediaTable?.selectedMergeCount()
+      );
       const activityLabel = data.state_label || "Ready";
       document.getElementById("activity-message").textContent = activityLabel;
       const isDownloading = data.current_download_bytes > 0 || data.current_download_started_at > 0;
@@ -755,6 +767,27 @@
         document.getElementById("activity-message").textContent = "Connection error";
       } finally {
         button.disabled = false;
+        await refresh();
+      }
+    });
+    document.getElementById("rerun-merge-form")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const button = document.getElementById("rerun-merge-button");
+      button.disabled = true;
+      document.getElementById("activity-message").textContent = "Re-merging";
+      try {
+        const body = window.gosyncMediaTable?.rerunMergeFormData
+          ? window.gosyncMediaTable.rerunMergeFormData(form)
+          : new FormData(form);
+        await fetch(form.action, {
+          method: form.method || "post",
+          body,
+          headers: { "X-Requested-With": "fetch" },
+        });
+      } catch (error) {
+        document.getElementById("activity-message").textContent = "Connection error";
+      } finally {
         await refresh();
       }
     });

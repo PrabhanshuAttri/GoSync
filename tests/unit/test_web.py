@@ -7,6 +7,7 @@ from gosync.auth import AuthConfig
 from gosync.constants import AUTH_METHOD_API_TOKEN
 from gosync.events import RECENT_EVENTS, log_event
 from gosync.manifest import MediaManifest
+from gosync.paths import media_download_path
 from gosync.progress import ProgressState
 from gosync.runtime import PreparedManifestState, RuntimePaths
 
@@ -52,6 +53,7 @@ def reset_web_state(monkeypatch) -> None:
     monkeypatch.setattr(web, "JOB_THREAD", None)
     monkeypatch.setattr(web, "SIDECAR_THREAD", None)
     monkeypatch.setattr(web, "TELEMETRY_THREAD", None)
+    monkeypatch.setattr(web, "MERGE_THREAD", None)
     monkeypatch.setattr(web, "RESUME_CACHE", {})
     monkeypatch.setattr(web, "MEDIA_ID_CACHE", {})
 
@@ -549,3 +551,209 @@ def test_current_events_endpoint_filters_to_current_job(
     assert [event["message"] for event in response.get_json()["items"]] == [
         "Current run"
     ]
+
+
+def chaptered_media_records() -> list[dict]:
+    return [
+        {
+            "id": "MERGEDOK00001",
+            "filename": "GX010301.MP4",
+            "file_extension": "MP4",
+            "file_size": 18,
+            "content_type": "video/mp4",
+            "item_count": 2,
+        },
+        {
+            "id": "SIZEMISMATCH1",
+            "filename": "GX010302.MP4",
+            "file_extension": "MP4",
+            "file_size": 18,
+            "content_type": "video/mp4",
+            "item_count": 2,
+        },
+        {
+            "id": "CHAPTSREADY01",
+            "filename": "GX010303.MP4",
+            "file_extension": "MP4",
+            "file_size": 18,
+            "content_type": "video/mp4",
+            "item_count": 2,
+        },
+        {
+            "id": "CHAPTSPARTIAL",
+            "filename": "GX010304.MP4",
+            "file_extension": "MP4",
+            "file_size": 27,
+            "content_type": "video/mp4",
+            "item_count": 3,
+        },
+        {
+            "id": "CHAPTSMISSING",
+            "filename": "GX010305.MP4",
+            "file_extension": "MP4",
+            "file_size": 18,
+            "content_type": "video/mp4",
+            "item_count": 2,
+        },
+    ]
+
+
+def test_sidecars_endpoint_computes_merge_status_across_all_states(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    monkeypatch.setattr("gosync.chapters.PER_CHAPTER_OVERHEAD_BYTES", 1)
+    monkeypatch.setattr("gosync.chapters.MIN_TOLERANCE_BYTES", 1)
+    monkeypatch.setattr("gosync.chapters.MAX_TOLERANCE_BYTES", 5)
+    write_sample_har(tmp_path / "gopro.com.har", media=chaptered_media_records())
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+
+    # merged: target size matches the local chapter sum exactly.
+    (output_dir / "GX010301.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020301.MP4").write_text("chapter-2", encoding="utf-8")
+    media_download_path(output_dir, "GX010301.MP4").parent.mkdir(parents=True)
+    media_download_path(output_dir, "GX010301.MP4").write_text(
+        "chapter-1chapter-2", encoding="utf-8"
+    )
+
+    # size_mismatch: target exists but is far off the local chapter sum.
+    (output_dir / "GX010302.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020302.MP4").write_text("chapter-2", encoding="utf-8")
+    media_download_path(output_dir, "GX010302.MP4").parent.mkdir(
+        parents=True, exist_ok=True
+    )
+    media_download_path(output_dir, "GX010302.MP4").write_text("X", encoding="utf-8")
+
+    # chapters_ready: exact item_count chapters present, no merged target.
+    (output_dir / "GX010303.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020303.MP4").write_text("chapter-2", encoding="utf-8")
+
+    # chapters_partial: item_count=3 but only 2 chapters present.
+    (output_dir / "GX010304.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020304.MP4").write_text("chapter-2", encoding="utf-8")
+
+    # chapters_missing: nothing on disk for GX010305.MP4's group at all.
+
+    app = web.create_app(web_args(tmp_path))
+    response = app.test_client().get("/sidecars")
+
+    assert response.status_code == 200
+    rows_by_filename = {
+        item["filename"]: item for item in response.get_json()["items"]
+    }
+    assert rows_by_filename["GX010301.MP4"]["merge_status"] == "merged"
+    assert rows_by_filename["GX010301.MP4"]["remerge_eligible"] is True
+    assert rows_by_filename["GX010302.MP4"]["merge_status"] == "size_mismatch"
+    assert rows_by_filename["GX010302.MP4"]["remerge_eligible"] is True
+    assert rows_by_filename["GX010303.MP4"]["merge_status"] == "chapters_ready"
+    assert rows_by_filename["GX010303.MP4"]["remerge_eligible"] is True
+    assert rows_by_filename["GX010304.MP4"]["merge_status"] == "chapters_partial"
+    assert rows_by_filename["GX010304.MP4"]["remerge_eligible"] is False
+    assert rows_by_filename["GX010305.MP4"]["merge_status"] == "chapters_missing"
+    assert rows_by_filename["GX010305.MP4"]["remerge_eligible"] is False
+
+
+def test_sidecars_endpoint_omits_merge_status_for_non_chaptered_items(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har")
+    app = web.create_app(web_args(tmp_path))
+
+    response = app.test_client().get("/sidecars")
+
+    assert response.status_code == 200
+    items = response.get_json()["items"]
+    assert items[0]["merge_status"] is None
+    assert items[0]["remerge_eligible"] is False
+
+
+def test_rerun_merge_starts_thread_with_eligible_items_only(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    monkeypatch.setattr("gosync.chapters.PER_CHAPTER_OVERHEAD_BYTES", 1)
+    monkeypatch.setattr("gosync.chapters.MIN_TOLERANCE_BYTES", 1)
+    monkeypatch.setattr("gosync.chapters.MAX_TOLERANCE_BYTES", 5)
+    write_sample_har(tmp_path / "gopro.com.har", media=chaptered_media_records())
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+
+    # GX010303.MP4: chapters_ready -- eligible.
+    (output_dir / "GX010303.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020303.MP4").write_text("chapter-2", encoding="utf-8")
+    # GX010304.MP4 (item_count=3): only 2 of 3 chapters -- not eligible.
+    (output_dir / "GX010304.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020304.MP4").write_text("chapter-2", encoding="utf-8")
+    # GX010305.MP4: nothing on disk -- not eligible.
+
+    app = web.create_app(web_args(tmp_path))
+
+    response = app.test_client().post(
+        "/rerun-merge",
+        data={
+            "selected_merge_keys": [
+                "CHAPTSREADY01_GX010303.MP4",
+                "CHAPTSPARTIAL_GX010304.MP4",
+                "CHAPTSMISSING_GX010305.MP4",
+            ]
+        },
+    )
+
+    assert response.status_code == 302
+    merge_thread = next(
+        thread
+        for thread in FakeThread.instances
+        if thread.target.__name__ == "run_remerge_job"
+    )
+    assert merge_thread.started
+    # (media_items, output_dir, state_file, progress, job_id)
+    assert [item.filename for item in merge_thread.args[0]] == ["GX010303.MP4"]
+
+
+def test_rerun_merge_rejects_when_nothing_eligible_selected(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har", media=chaptered_media_records())
+    app = web.create_app(web_args(tmp_path))
+
+    response = app.test_client().post("/rerun-merge", data={})
+
+    assert response.status_code == 302
+    assert FakeThread.instances == []
+    assert web.PROGRESS.message == "No eligible chaptered media selected for re-merge"
+
+
+def test_rerun_merge_rejects_while_job_running(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har", media=chaptered_media_records())
+    app = web.create_app(web_args(tmp_path))
+
+    class RunningThread:
+        def is_alive(self) -> bool:
+            return True
+
+    monkeypatch.setattr(web, "MERGE_THREAD", RunningThread())
+
+    response = app.test_client().post(
+        "/rerun-merge",
+        data={"selected_merge_keys": ["CHAPTSREADY01_GX010303.MP4"]},
+    )
+
+    assert response.status_code == 302
+    assert FakeThread.instances == []
+    assert web.PROGRESS.message == "A job is already running"

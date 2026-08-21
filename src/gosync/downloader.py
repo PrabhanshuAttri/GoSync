@@ -1,6 +1,5 @@
 import inspect
 import json
-import re
 import shutil
 import subprocess
 import tempfile
@@ -14,7 +13,21 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import ChunkedEncodingError, ConnectionError, ReadTimeout
 from urllib3.util.retry import Retry
 
-from gosync.config import FFMPEG_BINARY, FFMPEG_TIMEOUT_SECONDS, REQUEST_TIMEOUT
+from gosync.chapters import (
+    find_chapter_source_files,
+    has_chapter_files,
+    is_near_tolerance_boundary,
+    size_matches,
+    validate_chapter_integrity,
+)
+from gosync.config import (
+    EXIFTOOL_BINARY,
+    EXIFTOOL_TIMEOUT_SECONDS,
+    FFMPEG_BINARY,
+    FFMPEG_TIMEOUT_SECONDS,
+    MAX_LOCAL_MERGES_PER_RUN,
+    REQUEST_TIMEOUT,
+)
 from gosync.constants import (
     DEFAULT_HAR_FILE,
     DEFAULT_HEADERS,
@@ -29,7 +42,12 @@ from gosync.events import ProgressEventThrottle, log_event
 from gosync.manifest import MediaItem
 from gosync.paths import media_download_path, safe_child_path
 from gosync.progress import ProgressState
-from gosync.state import mark_downloaded, mark_failed, pending_keys
+from gosync.state import (
+    mark_downloaded,
+    mark_failed,
+    pending_keys,
+    refresh_file_sizes,
+)
 
 try:
     from tqdm import tqdm
@@ -251,37 +269,6 @@ def parse_batch_max_bytes(value: str | int | None, media_items: list[MediaItem])
     return parsed
 
 
-def has_chapter_files(item: MediaItem) -> bool:
-    try:
-        return int(item.metadata.get("item_count") or 0) > 1
-    except (TypeError, ValueError):
-        return False
-
-
-# GoPro chapter filenames encode play order in the filename itself:
-#   - modern: G[HX]<chapter 2-digit><group 4-digit>.<ext>, e.g. GX010320.MP4
-#     (chapter 01) and GX020320.MP4 (chapter 02) of group 0320.
-#   - legacy: GOPR<group 4-digit>.<ext> is chapter 1, followed by
-#     G[PH]<chapter 2-digit><group 4-digit>.<ext> for later chapters.
-# Embedded container metadata cannot be used for ordering: GoPro stamps every
-# chapter of a recording with identical session-level timestamps/duration.
-CHAPTER_FILENAME_PATTERN = re.compile(
-    r"^(?:GOPR(?P<gopr_group>\d{4})"
-    r"|G[A-Z](?P<chapter_num>\d{2})(?P<chapter_group>\d{4}))"
-    r"\.(?P<extension>[A-Za-z0-9]+)$",
-    re.IGNORECASE,
-)
-
-
-def parse_chapter_filename(filename: str) -> tuple[str, int] | None:
-    match = CHAPTER_FILENAME_PATTERN.match(filename)
-    if not match:
-        return None
-    if match.group("gopr_group"):
-        return match.group("gopr_group"), 0
-    return match.group("chapter_group"), int(match.group("chapter_num"))
-
-
 def build_size_batches(
     media_items: list[MediaItem],
     batch_max_bytes: int,
@@ -386,31 +373,86 @@ def _casefolded_file_in_dir(directory: Path, filename: str) -> Path | None:
     )
 
 
-def find_chapter_source_files(output_dir: Path, item: MediaItem) -> list[Path] | None:
-    parsed_item = parse_chapter_filename(item.filename)
-    if parsed_item is None or not output_dir.exists():
-        return None
-    item_group, _ = parsed_item
-    item_extension = Path(item.filename).suffix.casefold()
+# Duration-shaped tags that must never be copied from a single chapter onto
+# the merged file: the merge's real, longer combined duration must survive,
+# not chapter 1's individual duration. QuickTime/MP4 containers can expose
+# duration under any of these depending on the container, so all are
+# excluded rather than relying on just "Duration".
+EXIFTOOL_METADATA_EXCLUDE_TAGS = (
+    "Duration",
+    "TrackDuration",
+    "MediaDuration",
+    "PlayDuration",
+)
 
-    candidates: list[tuple[int, Path]] = []
-    for candidate in output_dir.iterdir():
-        if not candidate.is_file() or not safe_child_path(output_dir, candidate):
-            continue
-        if candidate.suffix.casefold() != item_extension:
-            continue
-        parsed_candidate = parse_chapter_filename(candidate.name)
-        if parsed_candidate is None:
-            continue
-        candidate_group, chapter_number = parsed_candidate
-        if candidate_group.casefold() != item_group.casefold():
-            continue
-        candidates.append((chapter_number, candidate))
 
-    if len(candidates) < 2:
-        return None
-    candidates.sort(key=lambda pair: pair[0])
-    return [path for _, path in candidates]
+def copy_merged_metadata(
+    target_path: Path,
+    source_chapter: Path,
+    item: MediaItem,
+    progress: ProgressState | None = None,
+    job_id: str | None = None,
+) -> None:
+    """Copy camera/lens/firmware metadata from a source chapter onto the
+    merged output. ffmpeg's stream copy does not preserve GoPro's
+    proprietary metadata boxes -- only exiftool understands them well
+    enough to carry them forward."""
+    exiftool_binary = shutil.which(EXIFTOOL_BINARY)
+    if not exiftool_binary:
+        emit_progress_event(
+            progress,
+            "download.chapter.metadata_skipped",
+            f"exiftool not found; {item.filename} merged without camera/lens "
+            "metadata",
+            level="WARNING",
+            job_id=job_id,
+            **media_event_payload(item),
+        )
+        return
+
+    try:
+        result = subprocess.run(
+            [
+                exiftool_binary,
+                "-TagsFromFile",
+                str(source_chapter),
+                "-all:all",
+                *(f"--{tag}" for tag in EXIFTOOL_METADATA_EXCLUDE_TAGS),
+                "-overwrite_original",
+                "-P",
+                str(target_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=EXIFTOOL_TIMEOUT_SECONDS,
+        )
+        copy_ok = result.returncode == 0
+        stderr_text = result.stderr or ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        copy_ok = False
+        stderr_text = str(exc)
+
+    if not copy_ok:
+        stderr_tail = "\n".join(stderr_text.strip().splitlines()[-20:])
+        emit_progress_event(
+            progress,
+            "download.chapter.metadata_failed",
+            f"Failed to copy camera/lens metadata onto merged {item.filename}",
+            level="WARNING",
+            job_id=job_id,
+            error_details=stderr_tail,
+            **media_event_payload(item),
+        )
+        return
+
+    emit_progress_event(
+        progress,
+        "download.chapter.metadata_copied",
+        f"Copied camera/lens metadata from {source_chapter.name} onto "
+        f"{item.filename}",
+        job_id=job_id,
+        **media_event_payload(item),
+    )
 
 
 def merge_chapter_files(
@@ -517,6 +559,8 @@ def merge_chapter_files(
         target_path.parent.mkdir(parents=True, exist_ok=True)
         merged_tmp_path.replace(target_path)
 
+    copy_merged_metadata(target_path, chapter_paths[0], item, progress, job_id)
+
     extension = target_path.suffix.lstrip(".").lower() or "unknown"
     originals_dir = output_dir / f"{ORIGINAL_UNMERGED_FOLDER_PREFIX}_{extension}"
     originals_dir.mkdir(parents=True, exist_ok=True)
@@ -603,6 +647,140 @@ def organize_extracted_media(
             completed_keys.add(item.key)
 
     organize_flat_media_files(output_dir)
+    return completed_keys
+
+
+def partition_locally_mergeable_chapters(
+    pending_items: list[MediaItem], output_dir: Path
+) -> tuple[list[MediaItem], list[MediaItem]]:
+    """Split pending_items into (locally_mergeable, still_pending). An item
+    only counts as locally mergeable if it's chaptered and *every* one of
+    its chapters (exact item_count match, not merely >= 2) is already
+    present on disk -- either flat in output_dir or already relocated into
+    original_unmerged_<ext>/ by an earlier merge. Anything short of that
+    exact count is left in still_pending so it falls through to the normal
+    network download path unchanged; treating a partial chapter set as
+    "present" would merge an incomplete recording and mark it downloaded
+    permanently."""
+    locally_mergeable: list[MediaItem] = []
+    still_pending: list[MediaItem] = []
+    for item in pending_items:
+        if not has_chapter_files(item):
+            still_pending.append(item)
+            continue
+        try:
+            item_count = int(item.metadata.get("item_count") or 0)
+        except (TypeError, ValueError):
+            item_count = 0
+        found_chapters = find_chapter_source_files(output_dir, item)
+        if (
+            item_count > 0
+            and found_chapters is not None
+            and len(found_chapters) == item_count
+            and validate_chapter_integrity(found_chapters)
+        ):
+            # validate_chapter_integrity catches a chapter that merely
+            # *exists* (satisfying the count check above) but is truncated
+            # or zero-byte -- count-and-sum checks alone can't see this,
+            # since a corrupt chapter's bad size would otherwise just
+            # become part of the sum later checks validate against.
+            locally_mergeable.append(item)
+        else:
+            still_pending.append(item)
+    return locally_mergeable, still_pending
+
+
+def merge_locally_available_chapters(
+    items: list[MediaItem],
+    output_dir: Path,
+    state_file: Path,
+    progress: ProgressState | None = None,
+    job_id: str | None = None,
+) -> set[str]:
+    """Merge chapters that are already fully present on disk, without any
+    network download -- this is the direct fix for chapters that GoSync
+    would otherwise re-download every run because a stale/mismatched
+    file_size flagged the manifest item pending again. Returns the set of
+    item keys completed this way; an item that fails to merge locally (e.g.
+    ffmpeg missing, corrupt chapter data) is left out of the result so the
+    caller can fall back to the normal network path for it, exactly like
+    merge_chapter_files's own existing fallback behavior."""
+    completed_keys: set[str] = set()
+    for item in items:
+        target_path = media_download_path(output_dir, item.filename)
+        if not safe_child_path(output_dir, target_path):
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if target_path.exists():
+            # Already merged -- this is the exact previously-buggy scenario
+            # (a stale size-mismatch flag next to a perfectly good merged
+            # file). Validate its size against the local chapters' actual
+            # on-disk bytes before trusting it: existence alone previously
+            # let a truncated/corrupted merged file be accepted silently,
+            # and once accepted, create_or_update_state()'s file_size
+            # preservation would have hidden that corruption permanently.
+            chapter_paths = find_chapter_source_files(output_dir, item)
+            local_chapter_sum = (
+                sum(path.stat().st_size for path in chapter_paths)
+                if chapter_paths
+                else None
+            )
+            actual_merged_size = target_path.stat().st_size
+            if chapter_paths and size_matches(
+                actual_merged_size, local_chapter_sum, item_count=len(chapter_paths)
+            ):
+                if is_near_tolerance_boundary(
+                    actual_merged_size, local_chapter_sum, len(chapter_paths)
+                ):
+                    emit_progress_event(
+                        progress,
+                        "download.chapter.size_delta_near_tolerance",
+                        f"{item.filename}'s merged size is near the size-"
+                        "tolerance limit -- verify the tolerance constants "
+                        "still match real-world merge overhead",
+                        level="WARNING",
+                        job_id=job_id,
+                        **media_event_payload(item),
+                    )
+                emit_progress_event(
+                    progress,
+                    "download.chapter.local_reuse",
+                    f"{item.filename} is already merged on disk; reusing it "
+                    "without a network download",
+                    job_id=job_id,
+                    **media_event_payload(item),
+                )
+                completed_keys.add(item.key)
+                continue
+
+            # Size doesn't validate against the local chapters -- don't
+            # trust the existing file. Fall through to re-merge it for real
+            # instead of silently accepting a corrupted/truncated output.
+            emit_progress_event(
+                progress,
+                "download.chapter.corrupt_merge_detected",
+                f"Existing merged file for {item.filename} does not match "
+                "its local chapters' size; re-merging instead of trusting it",
+                level="WARNING",
+                job_id=job_id,
+                **media_event_payload(item),
+            )
+
+        emit_progress_event(
+            progress,
+            "download.chapter.local_reuse",
+            f"Chapter files for {item.filename} are already on disk; "
+            "merging locally instead of re-downloading",
+            job_id=job_id,
+            **media_event_payload(item),
+        )
+        if merge_chapter_files(output_dir, item, target_path, progress, job_id):
+            completed_keys.add(item.key)
+
+    if completed_keys:
+        mark_downloaded(state_file, list(completed_keys))
+        refresh_file_sizes(state_file, output_dir, list(completed_keys))
     return completed_keys
 
 
@@ -785,6 +963,45 @@ def process_pipeline(
     state = mark_downloaded(state_file, [])
     state_keys = pending_keys(state)
     pending_items = [item for item in filtered_media_items if item.key in state_keys]
+
+    # Must run before the "if not pending_items" early-return below: the
+    # exact reported bug is a single stuck chaptered item with nothing else
+    # pending, so resolving it locally here -- before that early exit --
+    # is what keeps the fix from silently no-opping in precisely that case.
+    locally_mergeable, network_pending = partition_locally_mergeable_chapters(
+        pending_items, output_dir
+    )
+    # Cap how many chaptered items get merged (ffmpeg + exiftool, on
+    # potentially large files) in this one pass, so a large backlog can't
+    # hold whatever lock this run runs under for an unbounded amount of
+    # time. Anything beyond the cap is left untouched -- not merged, not
+    # sent to the network path -- so it's picked up fresh on the next run.
+    capped_locally_mergeable = locally_mergeable[:MAX_LOCAL_MERGES_PER_RUN]
+    deferred_locally_mergeable = locally_mergeable[MAX_LOCAL_MERGES_PER_RUN:]
+    if deferred_locally_mergeable:
+        emit_progress_event(
+            progress,
+            "download.chapter.local_merge_batch_deferred",
+            f"{len(deferred_locally_mergeable)} locally-mergeable chaptered "
+            f"item(s) deferred to the next run (local-merge batch limit "
+            f"{MAX_LOCAL_MERGES_PER_RUN} reached this run)",
+            job_id=job_id,
+            deferred_count=len(deferred_locally_mergeable),
+        )
+    if capped_locally_mergeable:
+        locally_merged_keys = merge_locally_available_chapters(
+            capped_locally_mergeable, output_dir, state_file, progress, job_id
+        )
+        if locally_merged_keys:
+            state = mark_downloaded(state_file, [])
+        pending_items = network_pending + [
+            item
+            for item in capped_locally_mergeable
+            if item.key not in locally_merged_keys
+        ]
+    else:
+        pending_items = network_pending
+
     completed_count = completed_count_for_items(
         state,
         filtered_progress_items,
@@ -800,14 +1017,26 @@ def process_pipeline(
         )
 
     if not pending_items:
-        emit_progress_event(
-            progress,
-            "download.file.skipped",
-            "All media files have already been downloaded.",
-            level="WARNING",
-            job_id=job_id,
-            skipped_count=len(filtered_media_items),
-        )
+        if deferred_locally_mergeable:
+            emit_progress_event(
+                progress,
+                "download.file.skipped",
+                f"Nothing left to download this run; "
+                f"{len(deferred_locally_mergeable)} chaptered item(s) "
+                "deferred to the next run by the local-merge batch limit.",
+                level="WARNING",
+                job_id=job_id,
+                skipped_count=len(filtered_media_items),
+            )
+        else:
+            emit_progress_event(
+                progress,
+                "download.file.skipped",
+                "All media files have already been downloaded.",
+                level="WARNING",
+                job_id=job_id,
+                skipped_count=len(filtered_media_items),
+            )
         return
 
     batch_cap_items = batch_cap_media_items or filtered_media_items
@@ -976,6 +1205,7 @@ def process_pipeline(
 
             temp_zip.unlink(missing_ok=True)
             state = mark_downloaded(state_file, batch_keys)
+            state = refresh_file_sizes(state_file, output_dir, batch_keys)
             completed_count = completed_count_for_items(
                 state,
                 filtered_progress_items,
