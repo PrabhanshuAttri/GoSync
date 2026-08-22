@@ -7,7 +7,7 @@ long_description = (ROOT / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="gosync",
-    version="1.4.1",
+    version="1.4.5",
     author="Prabhanshu Attri",
     description="Self-hosted GoPro Cloud media downloader using browser HAR exports",
     long_description=long_description,
