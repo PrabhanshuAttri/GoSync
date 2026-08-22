@@ -1275,6 +1275,10 @@ button:disabled {
   white-space: nowrap;
 }
 
+.sidecar-table td .table-merge-status {
+  white-space: normal;
+}
+
 .sidecar-table th:nth-child(1),
 .sidecar-table td:nth-child(1),
 .sidecar-table th:nth-child(8),

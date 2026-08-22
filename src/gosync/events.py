@@ -357,6 +357,11 @@ def event_presentation(
         summary = fields.get("summary") or "Run complete"
     elif event == "run.stopped":
         summary = "Run stopped safely"
+    elif event == "error.validation" and fields.get("error_message"):
+        error = str(fields["error_message"]).strip()
+        if error:
+            ui_message = f"{message}: {error}" if message else error
+            detail_lines.append(f"Error: {error}")
 
     return {
         "group": group,

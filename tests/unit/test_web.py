@@ -1,3 +1,4 @@
+import json
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,9 +22,10 @@ def start_button_disabled(page: str) -> bool:
 class FakeThread:
     instances = []
 
-    def __init__(self, *, target, args, daemon):
+    def __init__(self, *, target, args, daemon, kwargs=None):
         self.target = target
         self.args = args
+        self.kwargs = kwargs or {}
         self.daemon = daemon
         self.started = False
         FakeThread.instances.append(self)
@@ -327,6 +329,98 @@ def test_sidecars_endpoint_includes_media_file_size(
     items = response.get_json()["items"]
     assert items[0]["filename"] == "GX010001.MP4"
     assert items[0]["file_size"] == 100
+
+
+def test_status_reconciles_durable_media_counts(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har")
+    app = web.create_app(web_args(tmp_path))
+    (tmp_path / "gosync_state.json").write_text(
+        json.dumps(
+            {
+                "media": {
+                    "one": {"key": "one", "download_status": "downloaded"},
+                    "two": {"key": "two", "download_status": "pending"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    response = app.test_client().get("/status")
+
+    assert response.status_code == 200
+    snapshot = response.get_json()
+    assert snapshot["completed_ids"] == 1
+    assert snapshot["total_ids"] == 2
+    assert snapshot["overall_percent"] == 50.0
+
+
+def test_status_reconciles_counts_for_env_supplied_api_token(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    args = web_args(tmp_path)
+    args.auth_token = "tok123"
+    args.user_id = "user123"
+    app = web.create_app(args)
+    (tmp_path / "gosync_state.json").write_text(
+        json.dumps(
+            {
+                "media": {
+                    "one": {"key": "one", "download_status": "downloaded"},
+                    "two": {"key": "two", "download_status": "pending"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = app.test_client().get("/status")
+
+    assert response.status_code == 200
+    snapshot = response.get_json()
+    assert snapshot["completed_ids"] == 1
+    assert snapshot["total_ids"] == 2
+    assert snapshot["capabilities"]["can_start"] is True
+
+
+def test_status_does_not_reconcile_counts_while_running(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    reset_web_state(monkeypatch)
+    write_sample_har(tmp_path / "gopro.com.har")
+    app = web.create_app(web_args(tmp_path))
+    (tmp_path / "gosync_state.json").write_text(
+        json.dumps(
+            {
+                "media": {
+                    "one": {"key": "one", "download_status": "downloaded"},
+                    "two": {"key": "two", "download_status": "pending"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    web.PROGRESS.update(
+        status="running",
+        total_ids=10,
+        completed_ids=5,
+        pending_ids=5,
+    )
+
+    response = app.test_client().get("/status")
+
+    assert response.status_code == 200
+    snapshot = response.get_json()
+    assert snapshot["total_ids"] == 10
+    assert snapshot["completed_ids"] == 5
 
 
 def test_favicon_endpoint_serves_icon(
@@ -646,6 +740,9 @@ def test_sidecars_endpoint_computes_merge_status_across_all_states(
     }
     assert rows_by_filename["GX010301.MP4"]["merge_status"] == "merged"
     assert rows_by_filename["GX010301.MP4"]["remerge_eligible"] is True
+    assert rows_by_filename["GX010301.MP4"]["merge_target_path"] == str(
+        media_download_path(output_dir, "GX010301.MP4")
+    )
     assert rows_by_filename["GX010302.MP4"]["merge_status"] == "size_mismatch"
     assert rows_by_filename["GX010302.MP4"]["remerge_eligible"] is True
     assert rows_by_filename["GX010303.MP4"]["merge_status"] == "chapters_ready"
@@ -654,6 +751,50 @@ def test_sidecars_endpoint_computes_merge_status_across_all_states(
     assert rows_by_filename["GX010304.MP4"]["remerge_eligible"] is False
     assert rows_by_filename["GX010305.MP4"]["merge_status"] == "chapters_missing"
     assert rows_by_filename["GX010305.MP4"]["remerge_eligible"] is False
+
+
+def test_sidecars_endpoint_reports_actual_size_for_merged_chapters(
+    tmp_path: Path,
+    write_sample_har,
+    monkeypatch,
+) -> None:
+    """A chaptered item's state record can carry a stale file_size (e.g. the
+    manifest's pre-merge chapter-sum estimate) even once it's genuinely
+    merged on disk. When merge_status confirms the on-disk file is a valid
+    merge, the row should report that file's real size, not whatever is
+    still recorded in gosync_state.json -- and should also surface the
+    manifest's originally reported size alongside it for comparison."""
+    reset_web_state(monkeypatch)
+    monkeypatch.setattr("gosync.chapters.PER_CHAPTER_OVERHEAD_BYTES", 1)
+    monkeypatch.setattr("gosync.chapters.MIN_TOLERANCE_BYTES", 1)
+    monkeypatch.setattr("gosync.chapters.MAX_TOLERANCE_BYTES", 5)
+    stale_records = [
+        {
+            "id": "MERGEDOK00001",
+            "filename": "GX010301.MP4",
+            "file_extension": "MP4",
+            "file_size": 999999,
+            "content_type": "video/mp4",
+            "item_count": 2,
+        }
+    ]
+    write_sample_har(tmp_path / "gopro.com.har", media=stale_records)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    (output_dir / "GX010301.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020301.MP4").write_text("chapter-2", encoding="utf-8")
+    merged_path = media_download_path(output_dir, "GX010301.MP4")
+    merged_path.parent.mkdir(parents=True)
+    merged_path.write_text("chapter-1chapter-2", encoding="utf-8")
+
+    app = web.create_app(web_args(tmp_path))
+    response = app.test_client().get("/sidecars")
+
+    assert response.status_code == 200
+    row = response.get_json()["items"][0]
+    assert row["merge_status"] == "merged"
+    assert row["file_size"] == merged_path.stat().st_size
+    assert row["manifest_file_size"] == 999999
 
 
 def test_sidecars_endpoint_omits_merge_status_for_non_chaptered_items(
@@ -716,6 +857,9 @@ def test_rerun_merge_starts_thread_with_eligible_items_only(
     assert merge_thread.started
     # (media_items, output_dir, state_file, progress, job_id)
     assert [item.filename for item in merge_thread.args[0]] == ["GX010303.MP4"]
+
+    events = [event["event"] for event in RECENT_EVENTS]
+    assert "media.scan.started" in events
 
 
 def test_rerun_merge_rejects_when_nothing_eligible_selected(

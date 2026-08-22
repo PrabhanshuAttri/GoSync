@@ -76,6 +76,7 @@ WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 DISPLAY_WEB_PORT = int(os.getenv("GOSYNC_WEB_PORT", str(WEB_PORT)))
 ACCESS_LOGS = os.getenv("ACCESS_LOGS", "true").lower() in {"1", "true", "yes", "on"}
+MAX_HAR_UPLOAD_BYTES = int(os.getenv("MAX_HAR_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 
 
 

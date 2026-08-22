@@ -426,3 +426,39 @@ def test_run_metadata_update_job_forces_telemetry_then_generates_sidecars(
 
     assert call_order == ["telemetry", "sidecar"]
     assert telemetry_calls[0]["force"] is True
+
+
+def test_run_remerge_job_calls_on_complete_when_nothing_to_merge(
+    tmp_path: Path,
+) -> None:
+    calls = []
+
+    runtime.run_remerge_job(
+        [],
+        tmp_path / "downloads",
+        tmp_path / "state.json",
+        on_complete=lambda: calls.append(True),
+    )
+
+    assert calls == [True]
+
+
+def test_run_remerge_job_calls_on_complete_even_when_merge_raises(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    def raise_error(*_a, **_k):
+        raise RuntimeError("ffmpeg exploded")
+
+    monkeypatch.setattr(runtime, "merge_chapter_files", raise_error)
+    calls = []
+
+    runtime.run_remerge_job(
+        [make_media_item("A", "GX010001.MP4", 10, item_count=2)],
+        tmp_path / "downloads",
+        tmp_path / "state.json",
+        on_complete=lambda: calls.append(True),
+    )
+
+    assert calls == [True]

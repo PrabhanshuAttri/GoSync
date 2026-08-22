@@ -1,4 +1,5 @@
 import argparse
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -104,19 +105,23 @@ def get_runtime_paths(
 
 def runtime_cache_key(
     paths: RuntimePaths,
-) -> tuple[str, float, str, float, str, float, str]:
-    har_mtime = (
-        paths.har_path.stat().st_mtime
-        if paths.har_path and paths.har_path.exists()
-        else 0.0
-    )
+) -> tuple[object, ...]:
+    def revision(path: Path | None) -> tuple[int, int, int]:
+        if path is None:
+            return (0, 0, 0)
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return (0, 0, 0)
+        return (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
     return (
         str(paths.har_path) if paths.har_path else "",
-        har_mtime,
+        revision(paths.har_path),
         str(paths.state_file),
-        paths.state_file.stat().st_mtime if paths.state_file.exists() else 0,
+        revision(paths.state_file),
         str(paths.output_dir),
-        paths.output_dir.stat().st_mtime if paths.output_dir.exists() else 0,
+        revision(paths.output_dir),
         f"{paths.auth.method}:{paths.auth.auth_token or ''}:{paths.auth.user_id or ''}",
     )
 
@@ -689,6 +694,7 @@ def run_remerge_job(
     state_file: Path,
     progress: ProgressState | None = None,
     job_id: str | None = None,
+    on_complete: Callable[[], None] | None = None,
 ) -> None:
     """User-triggered "Re-run merge" dashboard action: unconditionally
     re-merges the given chaptered items from their local chapter files,
@@ -727,6 +733,22 @@ def run_remerge_job(
         if remerged_keys:
             mark_downloaded(state_file, remerged_keys)
             refresh_file_sizes(state_file, output_dir, remerged_keys)
+            if progress:
+                final_state = load_state(state_file)
+                media = final_state.get("media", {})
+                total_ids = len(media) if isinstance(media, dict) else 0
+                completed_ids = sum(
+                    1
+                    for record in media.values()
+                    if isinstance(record, dict)
+                    and record.get("download_status") == "downloaded"
+                ) if isinstance(media, dict) else 0
+                progress.update(
+                    job_id_guard=job_id,
+                    total_ids=total_ids,
+                    completed_ids=completed_ids,
+                    pending_ids=max(total_ids - completed_ids, 0),
+                )
     except Exception as exc:
         LOGGER.exception("Re-merge job failed.")
         if progress:
@@ -748,6 +770,9 @@ def run_remerge_job(
                 cli_message=f"Re-merge failed: {exc}",
             )
         return
+    finally:
+        if on_complete:
+            on_complete()
 
     if progress:
         progress.update(

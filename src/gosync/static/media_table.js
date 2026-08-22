@@ -340,6 +340,7 @@
       const statusCell = document.createElement("td");
       const status = document.createElement("span");
       const mergeStatusCell = document.createElement("td");
+      const mergeStatusBadge = document.createElement("span");
       const remergeCell = document.createElement("td");
       const remergeCheckbox = document.createElement("input");
       const downloaded = isDownloaded(item);
@@ -369,8 +370,15 @@
 
       filename.textContent = item.filename;
       filename.title = item.filename;
-      size.textContent = formatFileSize(item.file_size);
-      size.title = item.file_size ? `${item.file_size} bytes` : "Unknown size";
+      if (item.merge_status && item.manifest_file_size) {
+        size.textContent = `${formatFileSize(item.file_size)} (manifest ${formatFileSize(item.manifest_file_size)})`;
+      } else {
+        size.textContent = formatFileSize(item.file_size);
+      }
+      size.title = [
+        item.file_size ? `On disk: ${formatFileSize(item.file_size)}` : "On disk: unknown",
+        item.manifest_file_size ? `Manifest: ${formatFileSize(item.manifest_file_size)}` : null,
+      ].filter(Boolean).join("\n");
       capturedAt.textContent = formatCapturedDate(item.captured_at);
       capturedAt.title = formatCapturedDateTime(item.captured_at);
       itemCount.textContent = String(item.item_count ?? 1);
@@ -378,11 +386,13 @@
       status.textContent = item.status;
 
       if (item.merge_status) {
-        mergeStatusCell.textContent = mergeStatusLabels[item.merge_status] || item.merge_status;
-        mergeStatusCell.className = `table-merge-status ${item.merge_status}`;
+        mergeStatusBadge.textContent = mergeStatusLabels[item.merge_status] || item.merge_status;
+        mergeStatusBadge.className = `table-merge-status ${item.merge_status}`;
+        mergeStatusBadge.title = item.merge_target_path || "";
       } else {
-        mergeStatusCell.textContent = "—";
-        mergeStatusCell.className = "table-merge-status not-chaptered";
+        mergeStatusBadge.textContent = "—";
+        mergeStatusBadge.className = "table-merge-status not-chaptered";
+        mergeStatusBadge.title = "";
       }
 
       remergeCheckbox.type = "checkbox";
@@ -415,6 +425,7 @@
 
       selectCell.append(checkbox);
       statusCell.append(status);
+      mergeStatusCell.append(mergeStatusBadge);
       row.append(
         selectCell,
         filename,

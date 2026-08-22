@@ -663,14 +663,26 @@
     };
     const refreshSidecarTable = async () => {
       const res = await fetch("/sidecars");
+      if (!res.ok) throw new Error(`Sidecar request failed (${res.status})`);
       const data = await res.json();
       const items = data.items || [];
       window.gosyncMediaTable?.setItems(items);
       renderFormatCounts(items);
     };
     let currentStatus = "idle";
+    let currentCapabilities = {};
+    const syncStartButtonCapability = () => {
+      const token = document.getElementById("auth-token")?.value.trim() || "";
+      const userId = document.getElementById("user-id")?.value.trim() || "";
+      const locallyConfiguredApiAuth = Boolean(token && userId);
+      document.getElementById("start-button").disabled = (
+        currentStatus === "running"
+        || !(currentCapabilities.can_start || locallyConfiguredApiAuth)
+      );
+    };
     async function refresh() {
       const res = await fetch("/status");
+      if (!res.ok) throw new Error(`Status request failed (${res.status})`);
       const data = await res.json();
       currentStatus = data.status || "idle";
       document.getElementById("overall").textContent = `${data.overall_percent}%`;
@@ -679,10 +691,11 @@
       setWidth("media-progress-fill", data.overall_percent);
       const isRunning = data.status === "running";
       document.getElementById("stop-button").disabled = !isRunning || data.stop_requested;
-      document.getElementById("start-button").disabled = isRunning;
-      document.getElementById("update-sidecars-button").disabled = isRunning;
+      currentCapabilities = data.capabilities || {};
+      syncStartButtonCapability();
+      document.getElementById("update-sidecars-button").disabled = !currentCapabilities.can_update_sidecars;
       document.getElementById("rerun-merge-button").disabled = (
-        isRunning || !window.gosyncMediaTable?.selectedMergeCount()
+        !currentCapabilities.can_remerge || !window.gosyncMediaTable?.selectedMergeCount()
       );
       const activityLabel = data.state_label || "Ready";
       document.getElementById("activity-message").textContent = activityLabel;
@@ -796,10 +809,17 @@
         document.getElementById("har-upload-form").requestSubmit();
       }
     });
+    document.getElementById("auth-token")?.addEventListener("input", syncStartButtonCapability);
+    document.getElementById("user-id")?.addEventListener("input", syncStartButtonCapability);
     async function scheduleRefresh() {
-      await refresh();
-      const delay = currentStatus === "running" ? 1500 : 5000;
-      setTimeout(scheduleRefresh, delay);
+      try {
+        await refresh();
+      } catch (error) {
+        document.getElementById("activity-message").textContent = "Connection error; retrying";
+      } finally {
+        const delay = currentStatus === "running" ? 1500 : 5000;
+        setTimeout(scheduleRefresh, delay);
+      }
     }
     scheduleRefresh();
   </script>
