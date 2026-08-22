@@ -3,6 +3,8 @@
   const extensionFilter = document.getElementById("extension-filter");
   const statusFilter = document.getElementById("status-filter");
   const selectVisible = document.getElementById("select-visible");
+  const selectRemergeVisible = document.getElementById("select-remerge-visible");
+  const rerunMergeCount = document.getElementById("rerun-merge-count");
   const selectionSummary = document.getElementById("selection-summary");
   const filesPerBatchInput = document.getElementById("files-per-batch");
   const sortButtons = Array.from(document.querySelectorAll(".sort-button"));
@@ -32,6 +34,9 @@
   let selectedMediaKeys = Array.isArray(restoredSettings.selectedKeys)
     ? new Set(restoredSettings.selectedKeys)
     : null;
+  let selectedMergeKeys = new Set(
+    Array.isArray(restoredSettings.selectedMergeKeys) ? restoredSettings.selectedMergeKeys : []
+  );
   let mediaSort = {
     key: ["size", "status", "captured_at", "item_count"].includes(restoredSettings.sortKey)
       ? restoredSettings.sortKey
@@ -50,6 +55,7 @@
       settingsKey,
       JSON.stringify({
         selectedKeys: selectedMediaKeys ? Array.from(selectedMediaKeys) : null,
+        selectedMergeKeys: Array.from(selectedMergeKeys),
         sortKey: mediaSort.key,
         sortDirection: mediaSort.direction,
         extensionFilter: extensionFilter.value,
@@ -69,6 +75,8 @@
       item.file_size ?? null,
       item.captured_at || "",
       item.status || "",
+      item.merge_status || "",
+      item.remerge_eligible || false,
     ])
   );
 
@@ -122,6 +130,14 @@
     downloading: "Downloading",
     downloaded: "Downloaded",
     pending: "Pending",
+  };
+
+  const mergeStatusLabels = {
+    merged: "Merged",
+    size_mismatch: "Size mismatch",
+    chapters_ready: "Chapters ready",
+    chapters_partial: "Chapters partial",
+    chapters_missing: "Chapters missing",
   };
 
   const syncStatusFilterOptions = () => {
@@ -252,6 +268,27 @@
     ))
   );
 
+  const visibleRemergeEligibleItems = () => (
+    sidecarItems.filter((item) => matchesFilters(item) && item.remerge_eligible && item.key)
+  );
+
+  const updateRerunMergeSummary = () => {
+    if (rerunMergeCount) {
+      rerunMergeCount.textContent = String(selectedMergeKeys.size);
+    }
+  };
+
+  const syncSelectRemergeVisibleState = () => {
+    if (!selectRemergeVisible) return;
+    const visible = visibleRemergeEligibleItems();
+    const selectedVisible = visible.filter((item) => selectedMergeKeys.has(item.key));
+    selectRemergeVisible.disabled = !visible.length;
+    selectRemergeVisible.checked = !!visible.length && selectedVisible.length === visible.length;
+    selectRemergeVisible.indeterminate = (
+      selectedVisible.length > 0 && selectedVisible.length < visible.length
+    );
+  };
+
   const pendingKeys = () => (
     sidecarItems
       .filter((item) => !isDownloaded(item) && item.key)
@@ -283,11 +320,11 @@
     const sortedItems = [...items].sort(compareMediaItems);
 
     if (!sidecarItems.length) {
-      tableBody.innerHTML = '<tr><td colspan="6" class="empty-cell">No media found.</td></tr>';
+      tableBody.innerHTML = '<tr><td colspan="8" class="empty-cell">No media found.</td></tr>';
       return;
     }
     if (!items.length) {
-      tableBody.innerHTML = '<tr><td colspan="6" class="empty-cell">No media matches this filter.</td></tr>';
+      tableBody.innerHTML = '<tr><td colspan="8" class="empty-cell">No media matches this filter.</td></tr>';
       return;
     }
 
@@ -302,6 +339,10 @@
       const itemCount = document.createElement("td");
       const statusCell = document.createElement("td");
       const status = document.createElement("span");
+      const mergeStatusCell = document.createElement("td");
+      const mergeStatusBadge = document.createElement("span");
+      const remergeCell = document.createElement("td");
+      const remergeCheckbox = document.createElement("input");
       const downloaded = isDownloaded(item);
       const selectable = !downloaded;
 
@@ -329,17 +370,72 @@
 
       filename.textContent = item.filename;
       filename.title = item.filename;
-      size.textContent = formatFileSize(item.file_size);
-      size.title = item.file_size ? `${item.file_size} bytes` : "Unknown size";
+      if (item.merge_status && item.manifest_file_size) {
+        size.textContent = `${formatFileSize(item.file_size)} (manifest ${formatFileSize(item.manifest_file_size)})`;
+      } else {
+        size.textContent = formatFileSize(item.file_size);
+      }
+      size.title = [
+        item.file_size ? `On disk: ${formatFileSize(item.file_size)}` : "On disk: unknown",
+        item.manifest_file_size ? `Manifest: ${formatFileSize(item.manifest_file_size)}` : null,
+      ].filter(Boolean).join("\n");
       capturedAt.textContent = formatCapturedDate(item.captured_at);
       capturedAt.title = formatCapturedDateTime(item.captured_at);
       itemCount.textContent = String(item.item_count ?? 1);
       status.className = `table-status ${item.status}`;
       status.textContent = item.status;
 
+      if (item.merge_status) {
+        mergeStatusBadge.textContent = mergeStatusLabels[item.merge_status] || item.merge_status;
+        mergeStatusBadge.className = `table-merge-status ${item.merge_status}`;
+        mergeStatusBadge.title = item.merge_target_path || "";
+      } else {
+        mergeStatusBadge.textContent = "—";
+        mergeStatusBadge.className = "table-merge-status not-chaptered";
+        mergeStatusBadge.title = "";
+      }
+
+      remergeCheckbox.type = "checkbox";
+      remergeCheckbox.name = "selected_merge_keys";
+      remergeCheckbox.value = item.key || "";
+      remergeCheckbox.checked = selectedMergeKeys.has(item.key);
+      remergeCheckbox.disabled = !item.remerge_eligible || !item.key;
+      remergeCheckbox.setAttribute("form", "rerun-merge-form");
+      remergeCheckbox.setAttribute(
+        "aria-label",
+        item.remerge_eligible
+          ? `Select ${item.filename} for re-merge`
+          : `${item.filename} has nothing to re-merge from`
+      );
+      remergeCheckbox.addEventListener("change", () => {
+        if (remergeCheckbox.checked) {
+          selectedMergeKeys.add(item.key);
+        } else {
+          selectedMergeKeys.delete(item.key);
+        }
+        updateRerunMergeSummary();
+        syncSelectRemergeVisibleState();
+        saveSettings();
+        document.getElementById("rerun-merge-button")?.toggleAttribute(
+          "disabled",
+          !selectedMergeKeys.size
+        );
+      });
+      remergeCell.append(remergeCheckbox);
+
       selectCell.append(checkbox);
       statusCell.append(status);
-      row.append(selectCell, filename, size, capturedAt, itemCount, statusCell);
+      mergeStatusCell.append(mergeStatusBadge);
+      row.append(
+        selectCell,
+        filename,
+        size,
+        capturedAt,
+        itemCount,
+        statusCell,
+        mergeStatusCell,
+        remergeCell
+      );
       tableBody.append(row);
     });
     if (tableWrap) {
@@ -350,6 +446,8 @@
     }
     syncSelectVisibleState();
     updateSelectionSummary();
+    syncSelectRemergeVisibleState();
+    updateRerunMergeSummary();
   };
 
   tableWrap?.addEventListener("scroll", () => {
@@ -384,6 +482,22 @@
     render();
   });
 
+  selectRemergeVisible?.addEventListener("change", () => {
+    visibleRemergeEligibleItems().forEach((item) => {
+      if (selectRemergeVisible.checked) {
+        selectedMergeKeys.add(item.key);
+      } else {
+        selectedMergeKeys.delete(item.key);
+      }
+    });
+    saveSettings();
+    render();
+    document.getElementById("rerun-merge-button")?.toggleAttribute(
+      "disabled",
+      !selectedMergeKeys.size
+    );
+  });
+
   filesPerBatchInput?.addEventListener("input", saveSettings);
   document.getElementById("start-form")?.addEventListener("submit", saveSettings);
   extensionFilter.addEventListener("change", () => {
@@ -416,6 +530,16 @@
       }
       return formData;
     },
+    rerunMergeFormData(form) {
+      saveSettings();
+      const formData = new FormData(form);
+      formData.delete("selected_merge_keys");
+      Array.from(selectedMergeKeys).forEach((key) => formData.append("selected_merge_keys", key));
+      return formData;
+    },
+    selectedMergeCount() {
+      return selectedMergeKeys.size;
+    },
     setItems(items) {
       const nextSignature = itemsSignature(items);
       if (nextSignature === lastItemsSignature) {
@@ -439,6 +563,12 @@
           Array.from(selectedMediaKeys).filter((key) => validKeys.has(key))
         );
       }
+      const validMergeKeys = new Set(
+        sidecarItems.filter((item) => item.remerge_eligible && item.key).map((item) => item.key)
+      );
+      selectedMergeKeys = new Set(
+        Array.from(selectedMergeKeys).filter((key) => validMergeKeys.has(key))
+      );
       syncExtensionFilterOptions();
       syncStatusFilterOptions();
       syncSortButtons();

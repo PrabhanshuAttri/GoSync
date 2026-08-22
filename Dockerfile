@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-ARG GOSYNC_VERSION=1.1.3
+ARG GOSYNC_VERSION=1.4.5
 
 LABEL org.opencontainers.image.title="GoSync"
 LABEL org.opencontainers.image.description="Self-hosted GoPro Cloud media download from a browser HAR export"
@@ -15,7 +15,7 @@ ENV PYTHONPATH=/app/src
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg libimage-exiftool-perl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

@@ -53,12 +53,15 @@ To use a different host directory or web port:
 GOSYNC_VOLUME_PATH=/mnt/media/gosync GOSYNC_WEB_PORT=49153 docker compose up
 ```
 
-Plain Docker also works:
+Plain Docker also works. Pass `--env-file .env` so settings like `AUTH_TOKEN`
+and `USER_ID` (see [.env.example](.env.example)) reach the container -- Docker
+does not read a `.env` file on its own unless told to:
 
 ```bash
 docker run --rm \
   -p 8080:8080 \
   -v "$PWD/data:/data" \
+  --env-file .env \
   ghcr.io/prabhanshuattri/gosync:latest
 ```
 

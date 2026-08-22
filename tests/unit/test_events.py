@@ -101,6 +101,22 @@ def test_verbose_cli_batch_started_lists_files_and_sizes() -> None:
     ]
 
 
+def test_validation_error_surfaces_underlying_exception_message() -> None:
+    event = log_event(
+        "error.validation",
+        "Could not load media for re-merge",
+        phase="selection",
+        level="WARNING",
+        error_type="ConnectionError",
+        error_message="GoPro API request timed out",
+    )
+
+    assert event["message"] == (
+        "Could not load media for re-merge: GoPro API request timed out"
+    )
+    assert "Error: GoPro API request timed out" in event["detail_lines"]
+
+
 def test_sidecar_event_uses_sidecar_group() -> None:
     event = log_event(
         "sidecar.generation.completed",

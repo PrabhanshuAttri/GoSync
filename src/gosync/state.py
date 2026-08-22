@@ -4,7 +4,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from gosync.constants import STATUS_DOWNLOADED, STATUS_FAILED, STATUS_PENDING
+from gosync.chapters import size_matches
+from gosync.constants import (
+    STATUS_DOWNLOADED,
+    STATUS_FAILED,
+    STATUS_PENDING,
+)
 from gosync.manifest import MediaManifest
 from gosync.paths import media_download_path, safe_child_path
 
@@ -63,12 +68,23 @@ def create_or_update_state(
         except (TypeError, ValueError):
             item_count = 1
 
+        file_size = item.file_size
+        if download_status == STATUS_DOWNLOADED and isinstance(
+            previous.get("file_size"), int
+        ):
+            # Once downloaded, the previously recorded file_size is the true
+            # on-disk size (set by refresh_file_sizes/sync_state_with_downloads),
+            # not the API's per-chapter sum -- re-adopting the manifest value
+            # here on every resync would immediately undo that and re-trigger
+            # the size-mismatch flip-to-pending loop on the very next run.
+            file_size = previous["file_size"]
+
         media_records[item.key] = {
             "key": item.key,
             "id": item.media_id,
             "filename": item.filename,
             "sidecar_filename": item.sidecar_filename,
-            "file_size": item.file_size,
+            "file_size": file_size,
             "captured_at": captured_at,
             "item_count": item_count,
             "download_status": download_status,
@@ -120,13 +136,6 @@ def _is_safe_child_path(base_dir: Path, candidate: Path) -> bool:
     return safe_child_path(base_dir, candidate)
 
 
-def _size_matches(actual_size: int, expected_size: int | None) -> bool:
-    # expected_size is only known when the API reported a file_size for this
-    # media item; without it we can't detect a mismatch, so fall back to
-    # existence alone.
-    return expected_size is None or actual_size == expected_size
-
-
 def _locate_media_file_size(
     output_dir: Path,
     filename: str,
@@ -152,11 +161,12 @@ def media_file_exists(
     filename: str,
     existing_filenames: dict[str, int] | None = None,
     expected_size: int | None = None,
+    item_count: int = 1,
 ) -> bool:
     actual_size = _locate_media_file_size(output_dir, filename, existing_filenames)
     if actual_size is None:
         return False
-    return _size_matches(actual_size, expected_size)
+    return size_matches(actual_size, expected_size, item_count)
 
 
 def sync_state_with_downloads(
@@ -180,12 +190,28 @@ def sync_state_with_downloads(
 
         expected_size = record.get("file_size")
         expected_size = expected_size if isinstance(expected_size, int) else None
+        try:
+            item_count = int(record.get("item_count") or 1)
+        except (TypeError, ValueError):
+            item_count = 1
         actual_size = _locate_media_file_size(output_dir, filename, existing_filenames)
-        exists = actual_size is not None and _size_matches(actual_size, expected_size)
+        exists = actual_size is not None and size_matches(
+            actual_size, expected_size, item_count
+        )
         current_status = str(record.get("download_status") or STATUS_PENDING)
         if exists and current_status != STATUS_DOWNLOADED:
             record["download_status"] = STATUS_DOWNLOADED
             record["last_error"] = ""
+            # Persist the real on-disk size, not just the status: a merged
+            # chapter recording's actual_size is almost never equal to the
+            # stale API chapter-sum expected_size that tolerance just
+            # accepted, and once download_status is downloaded,
+            # create_or_update_state() will never overwrite file_size from
+            # the manifest again -- so this is the only chance to record
+            # the true size for items that self-heal here rather than
+            # going through process_pipeline's refresh_file_sizes call.
+            if actual_size is not None:
+                record["file_size"] = actual_size
             changed.append(
                 {
                     "id": str(record.get("id") or ""),
@@ -317,6 +343,39 @@ def mark_downloaded(state_file: Path, keys: list[str]) -> dict[str, Any]:
             record["download_status"] = STATUS_DOWNLOADED
             record["last_error"] = ""
     save_state(state_file, state)
+    return state
+
+
+def refresh_file_sizes(
+    state_file: Path, output_dir: Path, keys: list[str]
+) -> dict[str, Any]:
+    """Re-stat just-downloaded/merged files and record their true on-disk
+    size. Chapter-merged recordings are rewritten by ffmpeg/exiftool and
+    rarely land at exactly the API's per-chapter file_size sum (container
+    remux overhead differs -- see gosync.chapters.tolerance_bytes).
+    Persisting the real size here is what lets later resume-scans compare
+    against reality instead of a stale API total a completed merge can
+    never match. Must be called only after all rewriting (ffmpeg merge,
+    exiftool metadata copy) for these keys has finished."""
+    state = load_state(state_file)
+    media = state.get("media", {})
+    if not isinstance(media, dict):
+        return state
+    existing_filenames = downloaded_filename_index(output_dir)
+    changed = False
+    for key in keys:
+        record = media.get(key)
+        if not isinstance(record, dict):
+            continue
+        filename = str(record.get("filename") or "")
+        if not filename:
+            continue
+        actual_size = _locate_media_file_size(output_dir, filename, existing_filenames)
+        if actual_size is not None and actual_size != record.get("file_size"):
+            record["file_size"] = actual_size
+            changed = True
+    if changed:
+        save_state(state_file, state)
     return state
 
 

@@ -109,6 +109,11 @@
               Update All Sidecars
             </button>
           </form>
+          <form id="rerun-merge-form" action="/rerun-merge" method="post" class="stop-form">
+            <button id="rerun-merge-button" class="secondary" type="submit" disabled>
+              Re-run Merge (<span id="rerun-merge-count">0</span> selected)
+            </button>
+          </form>
         </section>
       </aside>
 
@@ -253,11 +258,15 @@
                       <span class="sort-indicator asc" id="status-sort-indicator" aria-hidden="true"></span>
                     </button>
                   </th>
+                  <th>Merge</th>
+                  <th class="select-column">
+                    <input id="select-remerge-visible" type="checkbox" aria-label="Select all eligible chapters for re-merge">
+                  </th>
                 </tr>
               </thead>
               <tbody id="sidecar-table-body">
                 <tr>
-                  <td colspan="6" class="empty-cell">No media found.</td>
+                  <td colspan="8" class="empty-cell">No media found.</td>
                 </tr>
               </tbody>
             </table>
@@ -654,14 +663,26 @@
     };
     const refreshSidecarTable = async () => {
       const res = await fetch("/sidecars");
+      if (!res.ok) throw new Error(`Sidecar request failed (${res.status})`);
       const data = await res.json();
       const items = data.items || [];
       window.gosyncMediaTable?.setItems(items);
       renderFormatCounts(items);
     };
     let currentStatus = "idle";
+    let currentCapabilities = {};
+    const syncStartButtonCapability = () => {
+      const token = document.getElementById("auth-token")?.value.trim() || "";
+      const userId = document.getElementById("user-id")?.value.trim() || "";
+      const locallyConfiguredApiAuth = Boolean(token && userId);
+      document.getElementById("start-button").disabled = (
+        currentStatus === "running"
+        || !(currentCapabilities.can_start || locallyConfiguredApiAuth)
+      );
+    };
     async function refresh() {
       const res = await fetch("/status");
+      if (!res.ok) throw new Error(`Status request failed (${res.status})`);
       const data = await res.json();
       currentStatus = data.status || "idle";
       document.getElementById("overall").textContent = `${data.overall_percent}%`;
@@ -670,8 +691,12 @@
       setWidth("media-progress-fill", data.overall_percent);
       const isRunning = data.status === "running";
       document.getElementById("stop-button").disabled = !isRunning || data.stop_requested;
-      document.getElementById("start-button").disabled = isRunning;
-      document.getElementById("update-sidecars-button").disabled = isRunning;
+      currentCapabilities = data.capabilities || {};
+      syncStartButtonCapability();
+      document.getElementById("update-sidecars-button").disabled = !currentCapabilities.can_update_sidecars;
+      document.getElementById("rerun-merge-button").disabled = (
+        !currentCapabilities.can_remerge || !window.gosyncMediaTable?.selectedMergeCount()
+      );
       const activityLabel = data.state_label || "Ready";
       document.getElementById("activity-message").textContent = activityLabel;
       const isDownloading = data.current_download_bytes > 0 || data.current_download_started_at > 0;
@@ -758,15 +783,43 @@
         await refresh();
       }
     });
+    document.getElementById("rerun-merge-form")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const button = document.getElementById("rerun-merge-button");
+      button.disabled = true;
+      document.getElementById("activity-message").textContent = "Re-merging";
+      try {
+        const body = window.gosyncMediaTable?.rerunMergeFormData
+          ? window.gosyncMediaTable.rerunMergeFormData(form)
+          : new FormData(form);
+        await fetch(form.action, {
+          method: form.method || "post",
+          body,
+          headers: { "X-Requested-With": "fetch" },
+        });
+      } catch (error) {
+        document.getElementById("activity-message").textContent = "Connection error";
+      } finally {
+        await refresh();
+      }
+    });
     document.getElementById("har-file-input")?.addEventListener("change", (event) => {
       if (event.currentTarget.files.length > 0) {
         document.getElementById("har-upload-form").requestSubmit();
       }
     });
+    document.getElementById("auth-token")?.addEventListener("input", syncStartButtonCapability);
+    document.getElementById("user-id")?.addEventListener("input", syncStartButtonCapability);
     async function scheduleRefresh() {
-      await refresh();
-      const delay = currentStatus === "running" ? 1500 : 5000;
-      setTimeout(scheduleRefresh, delay);
+      try {
+        await refresh();
+      } catch (error) {
+        document.getElementById("activity-message").textContent = "Connection error; retrying";
+      } finally {
+        const delay = currentStatus === "running" ? 1500 : 5000;
+        setTimeout(scheduleRefresh, delay);
+      }
     }
     scheduleRefresh();
   </script>

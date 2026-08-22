@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from requests.exceptions import ConnectionError as RequestsConnectionError
 
+from gosync.chapters import find_chapter_source_files
 from gosync.constants import (
     DEFAULT_HEADERS,
     DEFAULT_TEMP_ZIP,
@@ -19,14 +20,12 @@ from gosync.downloader import (
     build_size_batches,
     download_batch,
     extract_browser_headers,
-    find_chapter_source_files,
     format_media_for_log,
     format_size_mib,
     merge_chapter_files,
     organize_extracted_media,
     parse_batch_file_limit,
     parse_batch_max_bytes,
-    parse_chapter_filename,
     process_pipeline,
     resolve_har_file,
     safe_extract,
@@ -35,6 +34,14 @@ from gosync.manifest import MediaManifest
 from gosync.paths import media_download_path
 from gosync.progress import ProgressState
 from gosync.state import create_or_update_state, load_state, mark_downloaded
+
+
+def _which_ffmpeg_only(binary: str) -> str | None:
+    return "/usr/bin/ffmpeg" if binary == "ffmpeg" else None
+
+
+def _which_ffmpeg_and_exiftool(binary: str) -> str | None:
+    return f"/usr/bin/{binary}" if binary in ("ffmpeg", "exiftool") else None
 
 
 class _FakeStreamResponse:
@@ -146,65 +153,6 @@ def test_size_batches_keep_chaptered_items_single(make_media_item) -> None:
     ]
 
 
-def test_parse_chapter_filename_orders_modern_chapter_names() -> None:
-    assert parse_chapter_filename("GX010320.MP4") == ("0320", 1)
-    assert parse_chapter_filename("gx020320.mp4") == ("0320", 2)
-    assert parse_chapter_filename("vacation.mp4") is None
-
-
-def test_parse_chapter_filename_supports_gopr_legacy_first_chapter() -> None:
-    assert parse_chapter_filename("GOPR0320.MP4") == ("0320", 0)
-    assert parse_chapter_filename("GP020320.MP4") == ("0320", 2)
-
-
-def test_find_chapter_source_files_orders_by_chapter_number(
-    tmp_path: Path,
-    make_media_item,
-) -> None:
-    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
-    output_dir = tmp_path / "downloads"
-    output_dir.mkdir()
-    for name in ("GX030320.MP4", "GX010320.MP4", "GX020320.MP4"):
-        (output_dir / name).write_text(name, encoding="utf-8")
-
-    result = find_chapter_source_files(output_dir, item)
-
-    assert result == [
-        output_dir / "GX010320.MP4",
-        output_dir / "GX020320.MP4",
-        output_dir / "GX030320.MP4",
-    ]
-
-
-def test_find_chapter_source_files_excludes_other_extensions_and_groups(
-    tmp_path: Path,
-    make_media_item,
-) -> None:
-    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
-    output_dir = tmp_path / "downloads"
-    output_dir.mkdir()
-    (output_dir / "GX010320.MP4").write_text("chapter-1", encoding="utf-8")
-    (output_dir / "GX020320.MP4").write_text("chapter-2", encoding="utf-8")
-    (output_dir / "GL010320.LRV").write_text("proxy", encoding="utf-8")
-    (output_dir / "GX010500.MP4").write_text("other recording", encoding="utf-8")
-
-    result = find_chapter_source_files(output_dir, item)
-
-    assert result == [output_dir / "GX010320.MP4", output_dir / "GX020320.MP4"]
-
-
-def test_find_chapter_source_files_returns_none_when_fewer_than_two_present(
-    tmp_path: Path,
-    make_media_item,
-) -> None:
-    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
-    output_dir = tmp_path / "downloads"
-    output_dir.mkdir()
-    (output_dir / "GX010320.MP4").write_text("chapter-1", encoding="utf-8")
-
-    assert find_chapter_source_files(output_dir, item) is None
-
-
 def test_merge_chapter_files_success_orders_chapters_in_concat_list(
     tmp_path: Path,
     make_media_item,
@@ -233,7 +181,7 @@ def test_merge_chapter_files_success_orders_chapters_in_concat_list(
         Path(cmd[-1]).write_text("chapter-1chapter-2chapter-3", encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(shutil, "which", lambda _binary: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_only)
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     progress = ProgressState(job_id="job-1")
@@ -287,6 +235,126 @@ def test_merge_chapter_files_missing_ffmpeg_falls_back(
         and event["level"] == "warning"
         for event in events
     )
+
+
+def test_merge_chapter_files_copies_metadata_from_first_chapter(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=2)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for name, content in (
+        ("GX010320.MP4", "chapter-1"),
+        ("GX020320.MP4", "chapter-2"),
+    ):
+        (output_dir / name).write_text(content, encoding="utf-8")
+    target_path = media_download_path(output_dir, item.filename)
+    exiftool_calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[0] == "/usr/bin/exiftool":
+            exiftool_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        Path(cmd[-1]).write_text("chapter-1chapter-2", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_and_exiftool)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    progress = ProgressState(job_id="job-1")
+
+    assert merge_chapter_files(output_dir, item, target_path, progress, "job-1") is True
+
+    assert len(exiftool_calls) == 1
+    cmd = exiftool_calls[0]
+    assert "-TagsFromFile" in cmd
+    # Metadata source must be chapter 1 at its pre-merge path (still present
+    # at merge time, before originals get moved aside).
+    source_arg = cmd[cmd.index("-TagsFromFile") + 1]
+    assert source_arg == str(output_dir / "GX010320.MP4")
+    assert "-all:all" in cmd
+    for tag in ("--Duration", "--TrackDuration", "--MediaDuration", "--PlayDuration"):
+        assert tag in cmd
+    assert cmd[-1] == str(target_path)
+    events = progress.snapshot()["events"]
+    assert any(
+        event["event"] == "download.chapter.metadata_copied" for event in events
+    )
+
+
+def test_merge_chapter_files_missing_exiftool_still_succeeds_with_warning(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=2)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for name, content in (
+        ("GX010320.MP4", "chapter-1"),
+        ("GX020320.MP4", "chapter-2"),
+    ):
+        (output_dir / name).write_text(content, encoding="utf-8")
+    target_path = media_download_path(output_dir, item.filename)
+
+    def fake_run(cmd, **_kwargs):
+        Path(cmd[-1]).write_text("chapter-1chapter-2", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_only)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    progress = ProgressState(job_id="job-1")
+
+    assert merge_chapter_files(output_dir, item, target_path, progress, "job-1") is True
+    assert target_path.read_text(encoding="utf-8") == "chapter-1chapter-2"
+    events = progress.snapshot()["events"]
+    assert any(
+        event["event"] == "download.chapter.metadata_skipped"
+        and event["level"] == "warning"
+        for event in events
+    )
+
+
+def test_merge_chapter_files_exiftool_failure_still_succeeds_with_warning(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=2)
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for name, content in (
+        ("GX010320.MP4", "chapter-1"),
+        ("GX020320.MP4", "chapter-2"),
+    ):
+        (output_dir / name).write_text(content, encoding="utf-8")
+    target_path = media_download_path(output_dir, item.filename)
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[0] == "/usr/bin/exiftool":
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="exiftool boom"
+            )
+        Path(cmd[-1]).write_text("chapter-1chapter-2", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_and_exiftool)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    progress = ProgressState(job_id="job-1")
+
+    merge_ok = merge_chapter_files(output_dir, item, target_path, progress, "job-1")
+    assert merge_ok is True
+    assert target_path.read_text(encoding="utf-8") == "chapter-1chapter-2"
+    events = progress.snapshot()["events"]
+    failed_events = [
+        event
+        for event in events
+        if event["event"] == "download.chapter.metadata_failed"
+    ]
+    assert len(failed_events) == 1
+    assert failed_events[0]["level"] == "warning"
+    assert "exiftool boom" in failed_events[0]["error_details"]
 
 
 def test_merge_chapter_files_subprocess_failure_preserves_sources(
@@ -458,6 +526,365 @@ def test_process_pipeline_merges_chapter_batch_and_marks_downloaded(
     assert merged_path.read_text(encoding="utf-8") == "chapter-1chapter-2chapter-3"
     assert not (output_dir / "GX020320.MP4").exists()
     assert not (output_dir / "GX030320.MP4").exists()
+
+
+def test_process_pipeline_merges_locally_present_chapters_without_network_download(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    """Direct regression test for the reported bug: a chaptered item whose
+    chapters are already fully present on disk (e.g. because a prior run's
+    merge succeeded but a stale size-mismatch flagged it pending again) must
+    be resolved by merging locally, never by re-downloading the zip. This
+    item is also the *only* pending item, which proves the local-merge
+    short-circuit runs before the "no pending items" early return."""
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=2)
+    state_file = tmp_path / "state.json"
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for name, content in (
+        ("GX010320.MP4", "chapter-1"),
+        ("GX020320.MP4", "chapter-2"),
+    ):
+        (output_dir / name).write_text(content, encoding="utf-8")
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[item], duplicates=[], matching_entries=1, media_responses=[]
+        ),
+    )
+
+    download_batch_calls: list[bool] = []
+
+    def fake_download_batch(*_args, **_kwargs):
+        download_batch_calls.append(True)
+
+    def fake_run(cmd, **_kwargs):
+        Path(cmd[-1]).write_text("chapter-1chapter-2", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_only)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+
+    process_pipeline(
+        media_items=[item],
+        data_dir=tmp_path,
+        output_dir=output_dir,
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+    )
+
+    assert download_batch_calls == []
+    state = load_state(state_file)
+    assert state["media"][item.key]["download_status"] == STATUS_DOWNLOADED
+    merged_path = media_download_path(output_dir, item.filename)
+    assert merged_path.read_text(encoding="utf-8") == "chapter-1chapter-2"
+
+
+def test_process_pipeline_local_merge_reuses_existing_merged_file_without_ffmpeg(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    """The exact reported-bug scenario: a stale size-mismatch already flagged
+    the item pending again, but a perfectly good merged file is already on
+    disk. This must be recognized without touching ffmpeg/exiftool at all."""
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=2)
+    state_file = tmp_path / "state.json"
+    output_dir = tmp_path / "downloads"
+    target_path = media_download_path(output_dir, item.filename)
+    target_path.parent.mkdir(parents=True)
+    target_path.write_text("already-merged", encoding="utf-8")
+    originals_dir = output_dir / "original_unmerged_mp4"
+    originals_dir.mkdir()
+    (originals_dir / "GX010320.MP4").write_text("chapter-1", encoding="utf-8")
+    (originals_dir / "GX020320.MP4").write_text("chapter-2", encoding="utf-8")
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[item], duplicates=[], matching_entries=1, media_responses=[]
+        ),
+    )
+
+    download_batch_calls: list[bool] = []
+
+    def fake_download_batch(*_args, **_kwargs):
+        download_batch_calls.append(True)
+
+    def fail_which(binary):
+        # The pre-merge chapter-integrity check legitimately probes for
+        # ffprobe even on this fast path -- only ffmpeg/exiftool (the merge
+        # tools) must never be invoked when a valid merged file already
+        # exists on disk. Returning None for ffprobe here just means the
+        # integrity check falls back to its size-only heuristic.
+        if binary == "ffprobe":
+            return None
+        raise AssertionError(
+            "ffmpeg/exiftool must not be invoked when the merged target "
+            "already exists on disk"
+        )
+
+    monkeypatch.setattr(shutil, "which", fail_which)
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+
+    process_pipeline(
+        media_items=[item],
+        data_dir=tmp_path,
+        output_dir=output_dir,
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+    )
+
+    assert download_batch_calls == []
+    assert target_path.read_text(encoding="utf-8") == "already-merged"
+    state = load_state(state_file)
+    assert state["media"][item.key]["download_status"] == STATUS_DOWNLOADED
+
+
+def test_process_pipeline_local_merge_rejects_corrupted_existing_merge(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    """Regression test for the corruption-hiding gap: an existing merged
+    file whose size does not match the sum of the local chapters' actual
+    bytes must NOT be trusted just because it exists -- it must be
+    re-merged for real instead of silently accepted (which would otherwise
+    let a truncated/corrupted file get permanently locked in by
+    create_or_update_state's file_size preservation)."""
+    monkeypatch.setattr("gosync.chapters.PER_CHAPTER_OVERHEAD_BYTES", 1)
+    monkeypatch.setattr("gosync.chapters.MIN_TOLERANCE_BYTES", 1)
+    monkeypatch.setattr("gosync.chapters.MAX_TOLERANCE_BYTES", 5)
+
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=2)
+    state_file = tmp_path / "state.json"
+    output_dir = tmp_path / "downloads"
+    target_path = media_download_path(output_dir, item.filename)
+    target_path.parent.mkdir(parents=True)
+    # Deliberately far off the local chapters' combined size (18 bytes) --
+    # simulates a truncated/corrupted merged file left over from a crash.
+    target_path.write_text("X", encoding="utf-8")
+    originals_dir = output_dir / "original_unmerged_mp4"
+    originals_dir.mkdir()
+    (originals_dir / "GX010320.MP4").write_text("chapter-1", encoding="utf-8")
+    (originals_dir / "GX020320.MP4").write_text("chapter-2", encoding="utf-8")
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[item], duplicates=[], matching_entries=1, media_responses=[]
+        ),
+    )
+
+    download_batch_calls: list[bool] = []
+
+    def fake_download_batch(*_args, **_kwargs):
+        download_batch_calls.append(True)
+
+    def fake_run(cmd, **_kwargs):
+        Path(cmd[-1]).write_text("chapter-1chapter-2", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_only)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+
+    process_pipeline(
+        media_items=[item],
+        data_dir=tmp_path,
+        output_dir=output_dir,
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+    )
+
+    assert download_batch_calls == []
+    assert target_path.read_text(encoding="utf-8") == "chapter-1chapter-2"
+    state = load_state(state_file)
+    assert state["media"][item.key]["download_status"] == STATUS_DOWNLOADED
+
+
+def test_process_pipeline_caps_local_merges_per_run(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    """MAX_LOCAL_MERGES_PER_RUN bounds how many chaptered items the
+    local-merge short-circuit processes in a single process_pipeline call --
+    the rest must be left untouched (not merged, not sent to the network
+    path) so a large backlog can't hold this run's lock for an unbounded
+    amount of time."""
+    monkeypatch.setattr("gosync.downloader.MAX_LOCAL_MERGES_PER_RUN", 1)
+
+    items = []
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    for media_id, group in (("A", "0301"), ("B", "0302"), ("C", "0303")):
+        item = make_media_item(media_id, f"GX01{group}.MP4", 18, item_count=2)
+        items.append(item)
+        (output_dir / f"GX01{group}.MP4").write_text("chapter-1", encoding="utf-8")
+        (output_dir / f"GX02{group}.MP4").write_text("chapter-2", encoding="utf-8")
+
+    state_file = tmp_path / "state.json"
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=items, duplicates=[], matching_entries=1, media_responses=[]
+        ),
+    )
+
+    download_batch_calls: list[bool] = []
+
+    def fake_download_batch(*_args, **_kwargs):
+        download_batch_calls.append(True)
+
+    def fake_run(cmd, **_kwargs):
+        Path(cmd[-1]).write_text("chapter-1chapter-2", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", _which_ffmpeg_only)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+
+    process_pipeline(
+        media_items=items,
+        data_dir=tmp_path,
+        output_dir=output_dir,
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+    )
+
+    assert download_batch_calls == []
+    state = load_state(state_file)
+    downloaded = [
+        item
+        for item in items
+        if state["media"][item.key]["download_status"] == STATUS_DOWNLOADED
+    ]
+    pending = [
+        item
+        for item in items
+        if state["media"][item.key]["download_status"] != STATUS_DOWNLOADED
+    ]
+    assert len(downloaded) == 1
+    assert len(pending) == 2
+
+
+def test_process_pipeline_partial_local_chapters_falls_through_to_network(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    """Only 2 of 3 expected chapters are present locally -- this must NOT be
+    treated as locally mergeable (that would merge an incomplete recording
+    and mark it downloaded permanently); it must fall through to the normal
+    network path unchanged."""
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=3)
+    state_file = tmp_path / "state.json"
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    (output_dir / "GX010320.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020320.MP4").write_text("chapter-2", encoding="utf-8")
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[item], duplicates=[], matching_entries=1, media_responses=[]
+        ),
+    )
+
+    download_batch_calls: list[bool] = []
+
+    def fake_download_batch(
+        _session,
+        _batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+        **_kwargs,
+    ):
+        download_batch_calls.append(True)
+        with zipfile.ZipFile(temp_zip, "w"):
+            pass
+
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+    monkeypatch.setattr("gosync.downloader.organize_extracted_media", lambda *_: None)
+
+    process_pipeline(
+        media_items=[item],
+        data_dir=tmp_path,
+        output_dir=output_dir,
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+    )
+
+    assert len(download_batch_calls) == 1
+
+
+def test_process_pipeline_local_merge_failure_falls_through_to_network(
+    tmp_path: Path,
+    make_media_item,
+    monkeypatch,
+) -> None:
+    """If the local-reuse merge attempt fails (e.g. ffmpeg missing), the
+    item must not be marked failed for that alone -- it falls through to
+    the normal network path, exactly like merge_chapter_files's own
+    existing missing-ffmpeg fallback."""
+    item = make_media_item("A", "GX010320.MP4", 30, item_count=2)
+    state_file = tmp_path / "state.json"
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    (output_dir / "GX010320.MP4").write_text("chapter-1", encoding="utf-8")
+    (output_dir / "GX020320.MP4").write_text("chapter-2", encoding="utf-8")
+    create_or_update_state(
+        state_file,
+        MediaManifest(
+            media=[item], duplicates=[], matching_entries=1, media_responses=[]
+        ),
+    )
+
+    download_batch_calls: list[bool] = []
+
+    def fake_download_batch(
+        _session,
+        _batch,
+        temp_zip,
+        _headers,
+        _progress=None,
+        _job_id=None,
+        **_kwargs,
+    ):
+        download_batch_calls.append(True)
+        with zipfile.ZipFile(temp_zip, "w") as zip_ref:
+            zip_ref.writestr("GX010320.MP4", "chapter-1")
+            zip_ref.writestr("GX020320.MP4", "chapter-2")
+
+    monkeypatch.setattr(shutil, "which", lambda _binary: None)
+    monkeypatch.setattr("gosync.downloader.create_session", lambda: object())
+    monkeypatch.setattr("gosync.downloader.download_batch", fake_download_batch)
+
+    process_pipeline(
+        media_items=[item],
+        data_dir=tmp_path,
+        output_dir=output_dir,
+        state_file=state_file,
+        headers={},
+        batch_max_bytes="auto",
+    )
+
+    assert len(download_batch_calls) == 1
+    state = load_state(state_file)
+    assert state["media"][item.key]["download_status"] != STATUS_FAILED
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")

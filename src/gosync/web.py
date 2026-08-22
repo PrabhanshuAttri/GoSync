@@ -1,7 +1,10 @@
 import argparse
+import contextlib
+import json
 import logging
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 from flask import (
@@ -16,7 +19,13 @@ from flask import (
 from werkzeug.utils import secure_filename
 
 from gosync import __version__
-from gosync.config import ACCESS_LOGS, IS_PROD
+from gosync.chapters import (
+    MERGE_STATUS_MERGED,
+    MERGE_STATUS_REMERGE_ELIGIBLE,
+    build_chapter_directory_listing,
+    compute_merge_status,
+)
+from gosync.config import ACCESS_LOGS, IS_PROD, MAX_HAR_UPLOAD_BYTES
 from gosync.constants import (
     AUTH_METHOD_API_TOKEN,
     AUTH_METHOD_HAR,
@@ -25,6 +34,7 @@ from gosync.constants import (
 )
 from gosync.events import current_run_status, recent_events
 from gosync.logging_config import LOGGER, configure_file_logging
+from gosync.paths import media_download_path
 from gosync.progress import ProgressState
 from gosync.runtime import (
     auth_source_label,
@@ -35,6 +45,7 @@ from gosync.runtime import (
     resolve_headers,
     run_download_job,
     run_metadata_update_job,
+    run_remerge_job,
     runtime_cache_key,
 )
 from gosync.state import (
@@ -46,6 +57,7 @@ PROGRESS = ProgressState()
 JOB_THREAD: threading.Thread | None = None
 SIDECAR_THREAD: threading.Thread | None = None
 TELEMETRY_THREAD: threading.Thread | None = None
+MERGE_THREAD: threading.Thread | None = None
 JOB_LOCK = threading.Lock()
 RESUME_CACHE: dict[str, object] = {}
 MEDIA_ID_CACHE: dict[str, object] = {}
@@ -77,15 +89,19 @@ def create_app(args: argparse.Namespace) -> Flask:
         werkzeug_logger.addFilter(StatusAccessLogFilter())
 
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = MAX_HAR_UPLOAD_BYTES
     LOGGER.info("Starting GoSync web app. data_dir=%s", data_dir)
     current_har_name = args.har_file
-    current_auth_method = (
-        getattr(args, "auth_method", None) or AUTH_METHOD_HAR
-    ).strip().lower()
-    if current_auth_method not in (AUTH_METHOD_HAR, AUTH_METHOD_API_TOKEN):
-        current_auth_method = AUTH_METHOD_HAR
     current_auth_token = (getattr(args, "auth_token", None) or "").strip()
     current_user_id = (getattr(args, "user_id", None) or "").strip()
+    # Mirrors apply_settings_form's inference so a token + user id supplied via
+    # AUTH_TOKEN/USER_ID env vars are active immediately on startup, not only
+    # after the settings form is resubmitted.
+    current_auth_method = (
+        AUTH_METHOD_API_TOKEN
+        if current_auth_token and current_user_id
+        else AUTH_METHOD_HAR
+    )
     current_download_telemetry = bool(getattr(args, "download_telemetry", False))
     current_create_xmp_sidecars = bool(getattr(args, "create_xmp_sidecars", True))
 
@@ -122,13 +138,20 @@ def create_app(args: argparse.Namespace) -> Flask:
             return bool(current_auth_token)
         return bool(selected_har_file())
 
+    def announce_manifest_loading() -> None:
+        """Give the dashboard something to show while the (possibly slow)
+        manifest fetch runs, before the job itself has started."""
+        message = (
+            "Fetching media list from GoPro..."
+            if current_auth_method == AUTH_METHOD_API_TOKEN
+            else "Reading HAR file..."
+        )
+        PROGRESS.update(state_label=message)
+        PROGRESS.emit_event("media.scan.started", message, phase="scan")
+
     def refresh_resume_counts(log_summary: bool = False) -> None:
-        if PROGRESS.status == "running":
+        if PROGRESS.status == "running" or not has_active_auth():
             return
-
-        if not has_active_auth():
-            return
-
         try:
             paths = get_runtime_paths(effective_args(), active_har_arg())
             cache_key = runtime_cache_key(paths)
@@ -174,13 +197,38 @@ def create_app(args: argparse.Namespace) -> Flask:
             LOGGER.warning("Failed to refresh resume counts: %s", exc)
             return
 
+    def refresh_dashboard_counts() -> None:
+        """Reconcile durable completion counts without rebuilding the manifest."""
+        if PROGRESS.status == "running" or not has_active_auth():
+            return
+        try:
+            paths = get_runtime_paths(effective_args(), active_har_arg())
+            if not paths.state_file.exists():
+                return
+            state = load_state(paths.state_file)
+            media = state.get("media", {})
+            if not isinstance(media, dict):
+                return
+            total_ids = len(media)
+            completed_ids = state_completed_count(state)
+            PROGRESS.update(
+                total_ids=total_ids,
+                completed_ids=completed_ids,
+                pending_ids=max(total_ids - completed_ids, 0),
+            )
+        except Exception as exc:
+            LOGGER.warning("Failed to refresh dashboard counts: %s", exc)
+
     def media_sidecar_rows() -> list[dict[str, str]]:
         state_records: list[dict[str, object]] = []
+        manifest_sizes: dict[str, int] = {}
         cache_key = None
+        output_dir: Path | None = None
 
         if has_active_auth():
             try:
                 paths = get_runtime_paths(effective_args(), active_har_arg())
+                output_dir = paths.output_dir
                 progress_snapshot = PROGRESS.snapshot()
                 cache_key = (
                     runtime_cache_key(paths),
@@ -197,9 +245,34 @@ def create_app(args: argparse.Namespace) -> Flask:
                     state = prepare_paths_manifest_state(paths).state
                 media = state.get("media", {})
                 state_records = list(media.values()) if isinstance(media, dict) else []
+
+                # The manifest dump is the API/HAR's own reported size for each
+                # item -- for chaptered items this is GoPro's expected total
+                # across all chapters, unlike state's file_size which gets
+                # frozen to the real on-disk size once downloaded (see
+                # create_or_update_state). Reading the last-written dump back
+                # (no rescan/network) lets the table show both for comparison.
+                if paths.manifest_file.exists():
+                    manifest_payload = json.loads(
+                        paths.manifest_file.read_text(encoding="utf-8")
+                    )
+                    for item in manifest_payload.get("media", []) or []:
+                        if not isinstance(item, dict):
+                            continue
+                        key = item.get("key")
+                        size = item.get("file_size")
+                        if key and isinstance(size, int):
+                            manifest_sizes[str(key)] = size
             except Exception as exc:
                 LOGGER.warning("Failed to prepare media table rows: %s", exc)
                 state_records = []
+
+        # Built once per request (not once per chaptered row) so a library
+        # with many chaptered items doesn't pay for repeated directory
+        # scans -- see gosync.chapters.build_chapter_directory_listing.
+        chapter_listing = (
+            build_chapter_directory_listing(output_dir) if output_dir else []
+        )
 
         rows = []
         current_batch_keys = set(PROGRESS.snapshot().get("current_batch_keys", []))
@@ -208,6 +281,8 @@ def create_app(args: argparse.Namespace) -> Flask:
             key=lambda item: str(item.get("filename", "")).lower(),
         ):
             filename = str(record.get("filename") or "")
+            item_count = int(record.get("item_count") or 1)
+            manifest_file_size = manifest_sizes.get(str(record.get("key") or ""))
             status = (
                 "downloading"
                 if str(record.get("key") or "") in current_batch_keys
@@ -215,14 +290,35 @@ def create_app(args: argparse.Namespace) -> Flask:
                 if record.get("download_status") == STATUS_DOWNLOADED
                 else "pending"
             )
+            merge_status = None
+            remerge_eligible = False
+            merge_target_path = None
+            file_size = record.get("file_size")
+            if item_count > 1 and output_dir is not None:
+                target_path = media_download_path(output_dir, filename)
+                merge_target_path = str(target_path)
+                pseudo_item = SimpleNamespace(
+                    filename=filename, metadata={"item_count": item_count}
+                )
+                merge_status = compute_merge_status(
+                    pseudo_item, target_path, chapter_listing
+                )
+                remerge_eligible = merge_status in MERGE_STATUS_REMERGE_ELIGIBLE
+                if merge_status == MERGE_STATUS_MERGED:
+                    with contextlib.suppress(OSError):
+                        file_size = target_path.stat().st_size
             rows.append(
                 {
                     "key": str(record.get("key") or ""),
                     "filename": filename,
-                    "item_count": int(record.get("item_count") or 1),
-                    "file_size": record.get("file_size"),
+                    "item_count": item_count,
+                    "file_size": file_size,
+                    "manifest_file_size": manifest_file_size,
                     "captured_at": str(record.get("captured_at") or ""),
                     "status": status,
+                    "merge_status": merge_status,
+                    "merge_target_path": merge_target_path,
+                    "remerge_eligible": remerge_eligible,
                 }
             )
         if cache_key is not None:
@@ -323,8 +419,33 @@ def create_app(args: argparse.Namespace) -> Flask:
             return redirect(url_for("index"))
 
         filename = secure_filename(uploaded.filename)
-        if not filename.endswith(".har"):
+        if not filename:
+            PROGRESS.emit_event(
+                "error.validation",
+                "Invalid HAR filename",
+                level="WARNING",
+                phase="selection",
+            )
+            return redirect(url_for("index"))
+        if not filename.lower().endswith(".har"):
             filename = f"{filename}.har"
+
+        try:
+            payload = json.load(uploaded.stream)
+            log = payload.get("log", {}) if isinstance(payload, dict) else {}
+            entries = log.get("entries", []) if isinstance(log, dict) else None
+            if not isinstance(entries, list) or len(entries) > 100_000:
+                raise ValueError("HAR must contain at most 100,000 log entries")
+            uploaded.stream.seek(0)
+        except (json.JSONDecodeError, OSError, RecursionError, ValueError) as exc:
+            PROGRESS.emit_event(
+                "error.validation",
+                "Invalid HAR upload",
+                level="WARNING",
+                phase="selection",
+                error_message=str(exc),
+            )
+            return redirect(url_for("index"))
 
         uploaded.save(data_dir / filename)
         current_har_name = filename
@@ -362,6 +483,7 @@ def create_app(args: argparse.Namespace) -> Flask:
             (JOB_THREAD is not None and JOB_THREAD.is_alive())
             or (SIDECAR_THREAD is not None and SIDECAR_THREAD.is_alive())
             or (TELEMETRY_THREAD is not None and TELEMETRY_THREAD.is_alive())
+            or (MERGE_THREAD is not None and MERGE_THREAD.is_alive())
         )
 
     @app.post("/start")
@@ -394,6 +516,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                 )
                 return job_action_response()
 
+            announce_manifest_loading()
             try:
                 prepared = prepare_runtime_manifest_state(run_args, selected_har)
             except Exception as exc:
@@ -403,6 +526,7 @@ def create_app(args: argparse.Namespace) -> Flask:
                     "Could not load media for download",
                     level="WARNING",
                     phase="selection",
+                    state_label="Ready",
                     error_type=type(exc).__name__,
                     error_message=str(exc),
                 )
@@ -551,16 +675,19 @@ def create_app(args: argparse.Namespace) -> Flask:
                 )
                 return job_action_response()
 
+            announce_manifest_loading()
             try:
                 prepared = prepare_runtime_manifest_state(
                     effective_args(), active_har_arg()
                 )
             except Exception as exc:
+                LOGGER.warning("Could not load media for sidecar update: %s", exc)
                 PROGRESS.emit_event(
                     "error.validation",
                     "Could not load media for sidecar update",
                     level="WARNING",
                     phase="selection",
+                    state_label="Ready",
                     error_type=type(exc).__name__,
                     error_message=str(exc),
                 )
@@ -619,6 +746,135 @@ def create_app(args: argparse.Namespace) -> Flask:
 
         return job_action_response()
 
+    @app.post("/rerun-merge")
+    def rerun_merge():
+        global MERGE_THREAD
+
+        with JOB_LOCK:
+            if any_job_running():
+                PROGRESS.emit_event(
+                    "error.validation",
+                    "A job is already running",
+                    level="WARNING",
+                    phase="selection",
+                    user_action="Wait for the current job to finish or stop it.",
+                )
+                return job_action_response()
+
+            if not has_active_auth():
+                PROGRESS.emit_event(
+                    "error.validation",
+                    "No HAR file or API token configured",
+                    level="WARNING",
+                    phase="selection",
+                    user_action=(
+                        "Configure a HAR file or API token before re-merging."
+                    ),
+                )
+                return job_action_response()
+
+            announce_manifest_loading()
+            try:
+                prepared = prepare_runtime_manifest_state(
+                    effective_args(), active_har_arg()
+                )
+            except Exception as exc:
+                LOGGER.warning("Could not load media for re-merge: %s", exc)
+                PROGRESS.emit_event(
+                    "error.validation",
+                    "Could not load media for re-merge",
+                    level="WARNING",
+                    phase="selection",
+                    state_label="Ready",
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
+                return job_action_response()
+
+            paths = prepared.paths
+            valid_keys = {item.key for item in prepared.manifest.media}
+            selected_keys = {
+                value
+                for value in request.form.getlist("selected_merge_keys")
+                if value
+            }
+            invalid_keys = selected_keys - valid_keys
+            if invalid_keys:
+                PROGRESS.emit_event(
+                    "error.validation",
+                    "Selected media no longer matches the HAR",
+                    level="WARNING",
+                    phase="selection",
+                    user_action="Refresh and try again.",
+                )
+                return job_action_response()
+
+            # Only re-merge rows the dashboard itself would offer the
+            # checkbox for -- chaptered items with something recoverable on
+            # disk (merged, size_mismatch, or chapters_ready). This mirrors
+            # media_sidecar_rows()'s own eligibility check server-side so a
+            # stale/forged form submission can't force a re-merge attempt on
+            # a row with nothing to merge from.
+            chapter_listing = build_chapter_directory_listing(paths.output_dir)
+            media_items = [
+                item
+                for item in prepared.manifest.media
+                if item.key in selected_keys
+                and compute_merge_status(
+                    item,
+                    media_download_path(paths.output_dir, item.filename),
+                    chapter_listing,
+                )
+                in MERGE_STATUS_REMERGE_ELIGIBLE
+            ]
+            if not media_items:
+                PROGRESS.emit_event(
+                    "error.validation",
+                    "No eligible chaptered media selected for re-merge",
+                    level="WARNING",
+                    phase="selection",
+                    user_action="Select at least one chaptered row to re-merge.",
+                )
+                return job_action_response()
+
+            job_id = uuid4().hex
+            MEDIA_ID_CACHE.clear()
+            completed_count = state_completed_count(prepared.state)
+            PROGRESS.update(
+                job_id=job_id,
+                status="running",
+                state_label="Re-merging",
+                stop_requested=False,
+                finished_at="",
+                total_ids=len(prepared.manifest.media),
+                completed_ids=completed_count,
+                pending_ids=max(len(prepared.manifest.media) - completed_count, 0),
+            )
+            PROGRESS.emit_event(
+                "download.chapter.remerge_started",
+                f"Re-merging {len(media_items)} chaptered file(s)",
+                level="ACTIVE",
+                phase="download",
+                job_id_guard=job_id,
+                set_message=False,
+            )
+
+            MERGE_THREAD = threading.Thread(
+                target=run_remerge_job,
+                args=(
+                    media_items,
+                    paths.output_dir,
+                    paths.state_file,
+                    PROGRESS,
+                    job_id,
+                ),
+                kwargs={"on_complete": MEDIA_ID_CACHE.clear},
+                daemon=True,
+            )
+            MERGE_THREAD.start()
+
+        return job_action_response()
+
     @app.post("/stop")
     def stop():
         if JOB_THREAD and JOB_THREAD.is_alive():
@@ -643,7 +899,19 @@ def create_app(args: argparse.Namespace) -> Flask:
 
     @app.get("/status")
     def status():
-        return jsonify(PROGRESS.snapshot())
+        refresh_dashboard_counts()
+        snapshot = PROGRESS.snapshot()
+        state_has_downloads = snapshot["completed_ids"] > 0
+        snapshot["capabilities"] = {
+            "can_start": has_active_auth() and snapshot["status"] != "running",
+            "can_update_sidecars": (
+                has_active_auth()
+                and state_has_downloads
+                and snapshot["status"] != "running"
+            ),
+            "can_remerge": snapshot["status"] != "running",
+        }
+        return jsonify(snapshot)
 
     @app.get("/api/runs/current/events")
     def current_events():

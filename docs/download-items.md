@@ -147,6 +147,14 @@ After extraction, GoSync:
 - Moves the original chapter files into
   `downloads/original_unmerged_<extension>/` once the merge succeeds, instead
   of deleting them, so the raw per-chapter footage is still recoverable.
+- Copies GoPro's proprietary camera/lens/firmware metadata onto the merged
+  file via `exiftool` (`-TagsFromFile` from chapter 1's pre-merge path),
+  since `ffmpeg`'s stream copy alone does not preserve those metadata boxes.
+  Duration-shaped tags (`Duration`, `TrackDuration`, `MediaDuration`,
+  `PlayDuration`) are explicitly excluded from the copy so the merged file
+  keeps its own true, longer combined duration rather than chapter 1's. If
+  `exiftool` is not installed, this step is skipped with a warning and the
+  merge still counts as successful.
 - Marks the manifest item downloaded like any other single-file item.
 
 While the merge is running, GoSync reports a `Merging` status (CLI log line
@@ -183,3 +191,111 @@ duplicate the parent manifest metadata across them.
 
 See [XMP sidecar processing](sidecars.md) for the metadata allowlist and
 excluded sensitive fields.
+
+## Locally-Available Chapters (No Re-Download)
+
+If a chaptered manifest item is pending again -- for example because its
+recorded `file_size` doesn't match the on-disk merged file within tolerance
+(see below), or because a previous merge attempt was interrupted -- and its
+raw chapter files are still fully present on disk (either flat in
+`downloads/` or already relocated to `downloads/original_unmerged_<ext>/` by
+an earlier merge), GoSync resolves this **without calling the GoPro zip API
+again**. This is checked before every batch of network downloads, so a
+single stuck chaptered item does not trigger a redundant multi-GB
+re-download.
+
+Two outcomes are possible once all `item_count` chapters are confirmed
+present on disk:
+
+- If the merged target file already exists, GoSync validates its size
+  against the sum of the local chapters' actual bytes before trusting it
+  (using the same tolerance described below). If it validates, the file is
+  reused as-is -- no `ffmpeg`/`exiftool` call. If it does **not** validate
+  (e.g. a truncated/corrupted merged file left over from an earlier crash),
+  GoSync does not trust it: it re-merges from the local chapters for real,
+  exactly as if the file hadn't existed.
+- If the merged target file does not exist yet, GoSync merges directly from
+  the local chapters (identical to a normal post-download merge, including
+  the `exiftool` metadata-copy step).
+
+Before either path, GoSync also sanity-checks each chapter file itself (not
+just that it exists): a chapter whose size is far below its siblings', or
+that fails a lightweight `ffprobe` read, is treated as untrustworthy and the
+item falls back to the normal network path instead of merging from bad
+local data.
+
+Chapters that are present but short of the full `item_count` (e.g. 2 of 3)
+are left untouched and fall through to the normal network download -- a
+partial local chapter set is never treated as "close enough" to merge, since
+that would silently produce an incomplete recording.
+
+To bound how much work one local-merge pass can do, GoSync processes at most
+`MAX_LOCAL_MERGES_PER_RUN` chaptered items this way per run; any remainder is
+picked up on the next run rather than holding up the rest of that run's
+downloads.
+
+## Chapter-Merge Size Tolerance
+
+A merged chapter file's size is compared against the sum of its raw
+chapters' sizes (or, before the first merge, the API's reported chapter-sum
+`file_size`) to detect truncation or corruption. Container remux overhead
+from `ffmpeg`'s concat muxer is roughly **constant per chapter** (each
+chapter's own `moov`/`ftyp` boxes get consolidated into one copy instead of
+N), not proportional to total file size -- so the tolerance is
+chapter-count-scaled bytes, not a percentage:
+
+```text
+tolerance = clamp(item_count * PER_CHAPTER_OVERHEAD_BYTES, MIN_TOLERANCE_BYTES, MAX_TOLERANCE_BYTES)
+```
+
+This tolerance only applies to chaptered items (`item_count > 1`). A plain,
+non-chaptered download is extracted from the zip unmodified, so any size
+deviation there is real truncation and must match exactly.
+
+## Verifying A Chapter Merge
+
+`gosync-verify-chapters` (or `python -m gosync.verify` if the package isn't
+installed via `pip install -e .`, e.g. inside the published Docker image)
+runs a deeper, `ffprobe`/`ffmpeg`-based check against a chapter merge: stream
+layout, container metadata, duration, exact per-stream packet counts, a
+byte-exact comparison of GoPro's `gpmd` telemetry payload, and playability
+spot-checks at the start, end, and each old chapter-boundary splice point.
+This is intentionally not run automatically (it can take minutes on
+multi-GB files) -- run it manually against a specific file or the whole
+manifest:
+
+```bash
+gosync-verify-chapters --filename GX010320.MP4
+gosync-verify-chapters   # verifies every chaptered item in manifest.json
+```
+
+An HTML report is always written, by default to
+`<data-dir>/reports/chapter-merge-verify.html`.
+
+## Dashboard Merge Status And Manual Re-Merge
+
+For chaptered manifest items, the web dashboard's media table shows a
+`Merge` status column, computed live from the filesystem on every page load
+(not persisted to `gosync_state.json`, so there's nothing to go stale
+between polls):
+
+- `merged` -- a valid merged file exists.
+- `size_mismatch` -- a merged file exists but its size doesn't validate.
+- `chapters_ready` -- all chapters present, no valid merge yet.
+- `chapters_partial` -- some, but not all, chapters present.
+- `chapters_missing` -- neither a valid merge nor enough chapters to build one.
+
+A second checkbox column lets you select rows and click **Re-run Merge** to
+force a fresh merge from the local chapters -- available whenever there's
+something to merge from (`merged`, `size_mismatch`, or `chapters_ready`),
+not just unhealthy rows. This is non-destructive (the merge writes to a
+temporary file and atomically replaces the target) and doubles as a way to
+refresh metadata, e.g. after installing `exiftool` for the first time.
+
+**Note:** files merged before the local-reuse/`exiftool` metadata-copy
+features existed do not retroactively get an `exiftool` metadata copy on
+their own. If you want GoPro's camera/lens/firmware metadata backfilled onto
+recordings merged with an older GoSync version, select those chaptered rows
+(use "select all eligible" to select every remergeable row at once) and
+click **Re-run Merge** -- this is a one-time step worth doing once after
+upgrading, not something GoSync does automatically.

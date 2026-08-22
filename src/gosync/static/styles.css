@@ -1275,8 +1275,14 @@ button:disabled {
   white-space: nowrap;
 }
 
+.sidecar-table td .table-merge-status {
+  white-space: normal;
+}
+
 .sidecar-table th:nth-child(1),
-.sidecar-table td:nth-child(1) {
+.sidecar-table td:nth-child(1),
+.sidecar-table th:nth-child(8),
+.sidecar-table td:nth-child(8) {
   width: 48px;
   text-align: center;
 }
@@ -1285,22 +1291,24 @@ button:disabled {
 .sidecar-table td:nth-child(2),
 .sidecar-table th:nth-child(3),
 .sidecar-table td:nth-child(3) {
-  width: calc((100% - 48px) * 0.29);
+  width: calc((100% - 96px) * 0.26);
 }
 
 .sidecar-table th:nth-child(4),
 .sidecar-table td:nth-child(4) {
-  width: calc((100% - 48px) * 0.1);
+  width: calc((100% - 96px) * 0.09);
 }
 
 .sidecar-table th:nth-child(5),
 .sidecar-table td:nth-child(5) {
-  width: calc((100% - 48px) * 0.18);
+  width: calc((100% - 96px) * 0.15);
 }
 
 .sidecar-table th:nth-child(6),
-.sidecar-table td:nth-child(6) {
-  width: calc((100% - 48px) * 0.14);
+.sidecar-table td:nth-child(6),
+.sidecar-table th:nth-child(7),
+.sidecar-table td:nth-child(7) {
+  width: calc((100% - 96px) * 0.12);
 }
 
 .sidecar-table tr:last-child td {
@@ -1338,6 +1346,45 @@ button:disabled {
 .table-status.pending {
   background: var(--amber);
   color: var(--warning-ink);
+}
+
+.table-merge-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 750;
+}
+
+.table-merge-status.not-chaptered {
+  background: none;
+  color: var(--muted);
+  padding: 0;
+}
+
+.table-merge-status.merged {
+  background: var(--good-bg);
+  color: var(--good-ink);
+}
+
+.table-merge-status.chapters_ready {
+  background: var(--blue);
+  color: var(--brand-ink);
+}
+
+.table-merge-status.chapters_partial,
+.table-merge-status.size_mismatch {
+  background: var(--amber);
+  color: var(--warning-ink);
+}
+
+.table-merge-status.chapters_missing {
+  background: var(--danger-bg, var(--amber));
+  color: var(--danger-ink, var(--warning-ink));
 }
 
 @media (min-width: 1920px) {
@@ -1612,7 +1659,9 @@ button:disabled {
   }
 
   .sidecar-table th:nth-child(1),
-  .sidecar-table td:nth-child(1) {
+  .sidecar-table td:nth-child(1),
+  .sidecar-table th:nth-child(8),
+  .sidecar-table td:nth-child(8) {
     width: 42px;
   }
 
